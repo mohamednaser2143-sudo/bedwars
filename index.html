@@ -165,10 +165,10 @@
       </div>
     </div>
 
-    <div class="lobbyFinePrint">Firebase lobby connected: Create Party and Join Party now use the live Realtime Database. Party codes, player slots, team assignments, player disconnects, and host match start are shared across browsers. Gameplay movement synchronization comes next.</div>
+    <div class="lobbyFinePrint">Firebase live multiplayer connected: party codes, team assignments, match start, player spawning, player position, rotation, movement animation, held-item state, armor display, and disconnect/removal are synchronized across browsers. Combat and shared world actions are the next networking step.</div>
   </div>
 </div>
-<div id="hud"><div class="teamTitle">BLUE TEAM</div><div>HP: <span id="hp">100</span>/100</div><div class="bar"><div id="hpbar"></div></div><div class="res iron">Iron: <span id="iron">0</span></div><div class="res gold">Gold: <span id="gold">0</span></div><div class="res dia">Diamonds: <span id="diamonds">0</span></div><div class="res emer">Emeralds: <span id="emeralds">0</span></div><div>Armor: <span id="armor">Leather</span></div><div>Bed: <span id="bed">ALIVE</span></div><div class="help">🛒 PURPLE NPC = ITEM SHOP • click him</div><div class="help">⚙ GREEN NPC = TEAM UPGRADES • click him</div><div class="help">🛏️ Protect your team bed and eliminate opposing players.</div></div>
+<div id="hud"><div class="teamTitle" id="teamTitle">BLUE TEAM</div><div>HP: <span id="hp">100</span>/100</div><div class="bar"><div id="hpbar"></div></div><div class="res iron">Iron: <span id="iron">0</span></div><div class="res gold">Gold: <span id="gold">0</span></div><div class="res dia">Diamonds: <span id="diamonds">0</span></div><div class="res emer">Emeralds: <span id="emeralds">0</span></div><div>Armor: <span id="armor">Leather</span></div><div>Bed: <span id="bed">ALIVE</span></div><div class="help">🛒 PURPLE NPC = ITEM SHOP • click him</div><div class="help">⚙ GREEN NPC = TEAM UPGRADES • click him</div><div class="help">🛏️ Protect your team bed and eliminate opposing players.</div></div>
 <div id="score"></div><div id="location">BLUE BASE</div><div id="guide"></div>
 <div id="hotbar">
 <div class="slot active" id="s1" onclick="selectSlot(1);event.stopPropagation()"><span class="key">1</span><span class="ico">⚔️</span><span id="swordLabel">Wood Sword</span></div>
@@ -256,7 +256,7 @@ addBox(0,-60,0,700,1,700,0x4d87a6);
 }
 buildWorld();
 // ===== UI =====
-function ui(){document.getElementById('hp').textContent=Math.max(0,Math.round(health));document.getElementById('hpbar').style.width=Math.max(0,health)+'%';for(const k of ['iron','gold','diamonds','emeralds','wool','arrows','tnt','gapples','fireballs'])document.getElementById(k).textContent=inv[k];document.getElementById('armor').textContent=['Leather','Iron','Diamond'][inv.armor];player.rig.armorGroup.visible=inv.armor>0;const armorColor=[0xb56536,0x9aa5ad,0x55d8ff][inv.armor];player.rig.armorGroup.children.forEach(c=>{if(c.material)c.material.color.setHex(armorColor)});document.getElementById('bed').textContent=beds.blue?.alive?'ALIVE':'DESTROYED';document.getElementById('bed').className=beds.blue?.alive?'alive':'gone';document.getElementById('swordLabel').textContent=['Wood Sword','Stone Sword','Iron Sword','Diamond Sword'][inv.sword];let html='<b>BEDWARS</b><br>';for(const t of teamKeys)html+=`<div class="teamRow"><span style="color:#${TEAM[t].color.toString(16).padStart(6,'0')}">${TEAM[t].name}</span>: <span class="bed ${beds[t]?.alive?'alive':'gone'}">${beds[t]?.alive?'BED ALIVE':'BED GONE'}</span></div>`;document.getElementById('score').innerHTML=html}
+function ui(){document.getElementById('hp').textContent=Math.max(0,Math.round(health));document.getElementById('hpbar').style.width=Math.max(0,health)+'%';for(const k of ['iron','gold','diamonds','emeralds','wool','arrows','tnt','gapples','fireballs'])document.getElementById(k).textContent=inv[k];document.getElementById('armor').textContent=['Leather','Iron','Diamond'][inv.armor];player.rig.armorGroup.visible=inv.armor>0;const armorColor=[0xb56536,0x9aa5ad,0x55d8ff][inv.armor];player.rig.armorGroup.children.forEach(c=>{if(c.material)c.material.color.setHex(armorColor)});const ownTeam=myTeam();document.getElementById('bed').textContent=beds[ownTeam]?.alive?'ALIVE':'DESTROYED';document.getElementById('bed').className=beds[ownTeam]?.alive?'alive':'gone';document.getElementById('swordLabel').textContent=['Wood Sword','Stone Sword','Iron Sword','Diamond Sword'][inv.sword];let html='<b>BEDWARS</b><br>';for(const t of teamKeys)html+=`<div class="teamRow"><span style="color:#${TEAM[t].color.toString(16).padStart(6,'0')}">${TEAM[t].name}</span>: <span class="bed ${beds[t]?.alive?'alive':'gone'}">${beds[t]?.alive?'BED ALIVE':'BED GONE'}</span></div>`;document.getElementById('score').innerHTML=html}
 function toast(s){const d=document.createElement('div');d.className='toast';d.textContent=s;document.body.appendChild(d);setTimeout(()=>d.remove(),2800)}function kill(s){const d=document.createElement('div');d.className='kill';d.textContent=s;document.getElementById('killfeed').appendChild(d);setTimeout(()=>d.remove(),4500)}function pop(p,s){const v=p.clone().add(new THREE.Vector3(0,4,0));v.project(camera);const d=document.createElement('div');d.className='damage';d.textContent=s;d.style.left=((v.x*.5+.5)*innerWidth)+'px';d.style.top=((-v.y*.5+.5)*innerHeight)+'px';document.body.appendChild(d);setTimeout(()=>d.remove(),750)}
 function selectSlot(n){selected=n;for(let i=1;i<=7;i++)document.getElementById('s'+i).classList.toggle('active',i===n);player.rig.sword.visible=n===1;player.rig.pick.visible=n===2}
 
@@ -480,10 +480,186 @@ async function startPartyMatch(){
   }
 }
 
-function startGame(){gameStarted=true;lastHealthRegen=performance.now();lastAlarm=performance.now();document.getElementById('menu').style.display='none';document.getElementById('hud').style.display='block';document.getElementById('score').style.display='block';document.getElementById('hotbar').style.display='flex';document.getElementById('crosshair').style.display='block';player.position.set(0,0,135);player.visible=true;firstPerson=false;shiftLock=false;document.getElementById('firstPersonBadge').style.display='none';ui();toast('Multiplayer-ready match started — no bots are spawned.');renderer.domElement.focus()}
-function nearNPC(){let best=null,bd=7;for(const n of npcs){if(n.userData.team!=='blue')continue;const d=player.position.distanceTo(n.position);if(d<bd){bd=d;best=n}}return best}
+
+// ===== LIVE MULTIPLAYER PLAYERS (STEP 3) =====
+const remotePlayers = {};
+let matchPlayersRef = null;
+let matchPlayersHandler = null;
+let lastNetworkSend = 0;
+
+function myTeam(){
+  return lobbyState.team || 'blue';
+}
+
+function teamSpawn(team){
+  const q=TEAM[team] || TEAM.blue;
+  return new THREE.Vector3(q.x,0,q.z);
+}
+
+function applyTeamAppearance(mesh,team){
+  const c=TEAM[team]?.color ?? TEAM.blue.color;
+  mesh.userData.team=team;
+  if(mesh.children[0]?.material)mesh.children[0].material.color.setHex(c); // torso
+  if(mesh.rig?.la?.children[0]?.material)mesh.rig.la.children[0].material.color.setHex(c);
+  if(mesh.rig?.ra?.children[0]?.material)mesh.rig.ra.children[0].material.color.setHex(c);
+}
+
+function removeRemotePlayer(uid){
+  const r=remotePlayers[uid];
+  if(!r)return;
+  scene.remove(r.mesh);
+  delete remotePlayers[uid];
+}
+
+function makeRemotePlayer(uid,data){
+  const team=data.team||'red';
+  const m=createR6(TEAM[team]?.color ?? 0xef3f3f,0x263445);
+  applyTeamAppearance(m,team);
+  const spawn=teamSpawn(team);
+  m.position.set(
+    Number.isFinite(Number(data.x))?Number(data.x):spawn.x,
+    Number.isFinite(Number(data.y))?Number(data.y):spawn.y,
+    Number.isFinite(Number(data.z))?Number(data.z):spawn.z
+  );
+  m.rotation.y=Number(data.rot)||0;
+
+  const tag=makeTextSprite(
+    `${data.name||'Player'} • ${TEAM[team]?.name||team}`,
+    '#ffffff',
+    'rgba(4,10,18,.86)',
+    .58
+  );
+  tag.position.set(0,7.3,0);
+  m.add(tag);
+
+  scene.add(m);
+  remotePlayers[uid]={
+    uid,
+    mesh:m,
+    team,
+    name:data.name||'Player',
+    target:new THREE.Vector3(m.position.x,m.position.y,m.position.z),
+    targetRot:m.rotation.y,
+    lastTarget:new THREE.Vector3(m.position.x,m.position.y,m.position.z),
+    walk:0,
+    dead:!!data.dead
+  };
+  return remotePlayers[uid];
+}
+
+function updateRemoteRecord(uid,data){
+  let r=remotePlayers[uid];
+  if(!r || r.team!==data.team || r.name!==(data.name||'Player')){
+    if(r)removeRemotePlayer(uid);
+    r=makeRemotePlayer(uid,data);
+  }
+  r.target.set(
+    Number.isFinite(Number(data.x))?Number(data.x):r.target.x,
+    Number.isFinite(Number(data.y))?Number(data.y):r.target.y,
+    Number.isFinite(Number(data.z))?Number(data.z):r.target.z
+  );
+  r.targetRot=Number.isFinite(Number(data.rot))?Number(data.rot):r.targetRot;
+  r.dead=!!data.dead;
+  r.mesh.visible=!r.dead;
+
+  if(r.mesh.rig){
+    r.mesh.rig.sword.visible=(Number(data.selected)||1)===1;
+    r.mesh.rig.pick.visible=(Number(data.selected)||1)===2;
+    const armor=Number(data.armor)||0;
+    r.mesh.rig.armorGroup.visible=armor>0;
+    const armorColor=[0xb56536,0x9aa5ad,0x55d8ff][armor]||0xb56536;
+    r.mesh.rig.armorGroup.children.forEach(c=>{if(c.material)c.material.color.setHex(armorColor)});
+  }
+}
+
+function listenToMatchPlayers(){
+  if(!lobbyState.code||!firebaseUser)return;
+  if(matchPlayersRef&&matchPlayersHandler)matchPlayersRef.off('value',matchPlayersHandler);
+
+  matchPlayersRef=db.ref(`rooms/${lobbyState.code}/players`);
+  matchPlayersHandler=snap=>{
+    const data=snap.val()||{};
+    const seen=new Set();
+
+    for(const [uid,p] of Object.entries(data)){
+      if(uid===firebaseUser.uid)continue;
+      seen.add(uid);
+      updateRemoteRecord(uid,p||{});
+    }
+
+    for(const uid of Object.keys(remotePlayers)){
+      if(!seen.has(uid))removeRemotePlayer(uid);
+    }
+  };
+  matchPlayersRef.on('value',matchPlayersHandler);
+}
+
+function updateRemotePlayers(){
+  for(const r of Object.values(remotePlayers)){
+    if(!r.mesh.visible)continue;
+
+    const before=r.mesh.position.clone();
+    r.mesh.position.lerp(r.target,.28);
+
+    let delta=r.targetRot-r.mesh.rotation.y;
+    delta=Math.atan2(Math.sin(delta),Math.cos(delta));
+    r.mesh.rotation.y+=delta*.30;
+
+    const moved=before.distanceTo(r.mesh.position)>.012;
+    if(moved&&r.mesh.rig){
+      r.walk+=.20;
+      const sw=Math.sin(r.walk)*.65;
+      r.mesh.rig.la.rotation.x=sw;
+      r.mesh.rig.ra.rotation.x=-sw;
+      r.mesh.rig.ll.rotation.x=-sw;
+      r.mesh.rig.rl.rotation.x=sw;
+    }else if(r.mesh.rig){
+      r.mesh.rig.la.rotation.x*=.75;
+      r.mesh.rig.ra.rotation.x*=.75;
+      r.mesh.rig.ll.rotation.x*=.75;
+      r.mesh.rig.rl.rotation.x*=.75;
+    }
+  }
+}
+
+function sendLocalPlayerState(force=false){
+  if(!gameStarted||!lobbyState.code||!firebaseUser)return;
+  const now=performance.now();
+  if(!force&&now-lastNetworkSend<100)return; // about 10 network updates/second
+  lastNetworkSend=now;
+
+  const state={
+    x:Number(player.position.x.toFixed(3)),
+    y:Number(player.position.y.toFixed(3)),
+    z:Number(player.position.z.toFixed(3)),
+    rot:Number(player.rotation.y.toFixed(4)),
+    hp:Math.max(0,Math.round(health)),
+    dead:!!isDead,
+    selected,
+    armor:inv.armor,
+    sword:inv.sword,
+    online:true,
+    lastSeen:Date.now()
+  };
+
+  db.ref(`rooms/${lobbyState.code}/players/${firebaseUser.uid}`)
+    .update(state)
+    .catch(err=>console.error('Player sync error:',err));
+}
+
+function stopMatchPlayerSync(){
+  if(matchPlayersRef&&matchPlayersHandler){
+    matchPlayersRef.off('value',matchPlayersHandler);
+    matchPlayersRef=null;
+    matchPlayersHandler=null;
+  }
+  for(const uid of Object.keys(remotePlayers))removeRemotePlayer(uid);
+}
+
+function startGame(){if(gameStarted)return;gameStarted=true;lastHealthRegen=performance.now();lastAlarm=performance.now();document.getElementById('menu').style.display='none';document.getElementById('hud').style.display='block';document.getElementById('score').style.display='block';document.getElementById('hotbar').style.display='flex';document.getElementById('crosshair').style.display='block';const team=myTeam(),spawn=teamSpawn(team);applyTeamAppearance(player,team);player.position.copy(spawn);const toCenter=new THREE.Vector3(-spawn.x,0,-spawn.z);if(toCenter.lengthSq()>0){toCenter.normalize();player.rotation.y=Math.atan2(toCenter.x,toCenter.z)}player.visible=true;firstPerson=false;shiftLock=false;document.getElementById('teamTitle').textContent=TEAM[team].name.toUpperCase()+' TEAM';document.getElementById('teamTitle').style.color='#'+TEAM[team].color.toString(16).padStart(6,'0');const upSection=document.querySelector('#upgrades .section');if(upSection)upSection.textContent='Permanent upgrades for '+TEAM[team].name;document.getElementById('firstPersonBadge').style.display='none';listenToMatchPlayers();sendLocalPlayerState(true);ui();toast(TEAM[team].name+' Team — live players connected!');renderer.domElement.focus()}
+function nearNPC(){let best=null,bd=7;for(const n of npcs){if(n.userData.team!==myTeam())continue;const d=player.position.distanceTo(n.position);if(d<bd){bd=d;best=n}}return best}
 function openShop(){const n=nearNPC();if(!n){toast('Get closer to the purple Shopkeeper NPC');return}shopOpen=true;document.getElementById('shop').style.display='flex';if(document.pointerLockElement)document.exitPointerLock()}
-function closeShop(){shopOpen=false;document.getElementById('shop').style.display='none'}function openUpgrades(){const n=nearNPC();let u=npcs.find(x=>x.userData.team==='blue'&&x.userData.type==='upgrade');if(!u||player.position.distanceTo(u.position)>7){toast('Get closer to the green Upgrades NPC');return}upgradeOpen=true;document.getElementById('upgrades').style.display='flex';if(document.pointerLockElement)document.exitPointerLock()}function closeUpgrades(){upgradeOpen=false;document.getElementById('upgrades').style.display='none'}
+function closeShop(){shopOpen=false;document.getElementById('shop').style.display='none'}function openUpgrades(){const n=nearNPC();let u=npcs.find(x=>x.userData.team===myTeam()&&x.userData.type==='upgrade');if(!u||player.position.distanceTo(u.position)>7){toast('Get closer to the green Upgrades NPC');return}upgradeOpen=true;document.getElementById('upgrades').style.display='flex';if(document.pointerLockElement)document.exitPointerLock()}function closeUpgrades(){upgradeOpen=false;document.getElementById('upgrades').style.display='none'}
 function spend(k,n){if(inv[k]<n){toast('Not enough '+k);return false}inv[k]-=n;return true}
 function buy(k){if(k==='wool'&&spend('iron',4))inv.wool+=16;else if(k==='stone'&&inv.sword<1&&spend('iron',10))inv.sword=1;else if(k==='ironSword'&&inv.sword<2&&spend('gold',7))inv.sword=2;else if(k==='diamondSword'&&inv.sword<3&&spend('emeralds',4))inv.sword=3;else if(k==='bow'&&spend('gold',12)){inv.bow=true;inv.arrows+=8}else if(k==='arrows'&&spend('gold',2))inv.arrows+=8;else if(k==='pick'&&spend('iron',10))inv.pickaxe=1;else if(k==='tnt'&&spend('gold',4))inv.tnt++;else if(k==='fireball'&&spend('iron',40))inv.fireballs++;else if(k==='gap'&&spend('gold',3))inv.gapples++;else if(k==='ironArmor'&&inv.armor<1&&spend('gold',12))inv.armor=1;else if(k==='diamondArmor'&&inv.armor<2&&spend('emeralds',6))inv.armor=2;else{ui();return}ui();toast('Purchased!');}
 function upgrade(k){
@@ -563,7 +739,7 @@ function blockAt(x,z,topY=null){
   }
   return null;
 }
-function placeWoolAt(p,team='blue',consume=true){
+function placeWoolAt(p,team=myTeam(),consume=true){
   const q=snapBuildPosition(p);
   // Never create a second block in exactly the same grid cell.
   if(blockAt(q.x,q.z,q.y+1.5))return null;
@@ -572,7 +748,7 @@ function placeWoolAt(p,team='blue',consume=true){
   // Explicit collision metadata: this block is real ground, not the preview.
   m.geometry.computeBoundingBox();
   blocks.push(m);
-  if(consume&&team==='blue')inv.wool--;
+  if(consume&&team===myTeam())inv.wool--;
   ui();
   return m;
 }
@@ -587,7 +763,7 @@ function getMineTarget(){
   raycaster.set(origin,dir);
   const targets=[];
   for(const b of blocks)if(b.visible&&b.userData?.solid&&b.userData?.breakable&&b.userData?.block)targets.push(b);
-  for(const t of teamKeys)if(t!=='blue'&&beds[t]?.alive&&beds[t].mesh.visible)targets.push(beds[t].mesh);
+  for(const t of teamKeys)if(t!==myTeam()&&beds[t]?.alive&&beds[t].mesh.visible)targets.push(beds[t].mesh);
   const hits=raycaster.intersectObjects(targets,true);
   if(!hits.length||hits[0].distance>10)return null;
   let obj=hits[0].object;
@@ -702,7 +878,7 @@ function updateBuildPreview(){
  document.getElementById('buildTip').style.display='block';
  if(p){previewBlock.position.copy(p);previewBlock.updateMatrixWorld(true)}
 }
-function placePlayerBlock(){if(selected!==3||inv.wool<=0||isDead)return;const p=getBuildCandidate();if(!p){toast(firstPerson?'Aim at a solid block face to place wool':'No valid block placement here');return}const m=placeWoolAt(p,'blue');if(!m){toast('That block space is already occupied');return}updateBuildPreview();}
+function placePlayerBlock(){if(selected!==3||inv.wool<=0||isDead)return;const p=getBuildCandidate();if(!p){toast(firstPerson?'Aim at a solid block face to place wool':'No valid block placement here');return}const m=placeWoolAt(p,myTeam());if(!m){toast('That block space is already occupied');return}updateBuildPreview();}
 // ===== RESOURCES =====
 function collect(){
   const now=performance.now();
@@ -718,7 +894,7 @@ function collect(){
       }
       // Iron/gold continue generating while nobody is standing on the generator.
       // The stored pile is collected when the player comes back.
-      if(player.position.distanceTo(g.mesh.position)<7&&(g.pendingIron>0||g.pendingGold>0)){
+      if(g.team===myTeam()&&player.position.distanceTo(g.mesh.position)<7&&(g.pendingIron>0||g.pendingGold>0)){
         inv.iron+=g.pendingIron;
         inv.gold+=g.pendingGold;
         g.pendingIron=0;
@@ -743,11 +919,11 @@ function collect(){
 
 function armorMult(a){const base=[1,.82,.67][a]||1;const prot=[1,.94,.88,.82][upgrades.prot]||1;return base*prot}function swordDamage(s){return [10,13,16,21][s]+upgrades.sharp}
 function hitBot(b,dmg,from){b.hp-=Math.round(dmg*armorMult(b.armor));pop(b.mesh.position,'-'+Math.round(dmg*armorMult(b.armor)));const dir=b.mesh.position.clone().sub(from).setY(0).normalize();b.kbx=dir.x*1.5;b.kbz=dir.z*1.5;b.vy=.24;if(b.hp<=0)botDeath(b,'You')}
-function attack(){if(isDead||swing||selected>2)return;swing=true;swingP=0;const dmg=selected===2?8:swordDamage(inv.sword);let target=null,dist=6;for(const b of bots){if(b.dead||b.final)continue;const d=player.position.distanceTo(b.mesh.position);if(d<dist){dist=d;target=b}}if(target){hitBot(target,dmg,player.position);return}for(const t of enemies('blue')){const bd=beds[t];if(bd.alive&&player.position.distanceTo(bd.mesh.position)<6){const power=selected===2&&inv.pickaxe?20:5;bd.hp-=power;pop(bd.mesh.position,'BED '+Math.max(0,bd.hp));if(bd.hp<=0)destroyBed(t,'You');return}}}
+function attack(){if(isDead||swing||selected>2)return;swing=true;swingP=0;const dmg=selected===2?8:swordDamage(inv.sword);let target=null,dist=6;for(const b of bots){if(b.dead||b.final)continue;const d=player.position.distanceTo(b.mesh.position);if(d<dist){dist=d;target=b}}if(target){hitBot(target,dmg,player.position);return}for(const t of enemies(myTeam())){const bd=beds[t];if(bd.alive&&player.position.distanceTo(bd.mesh.position)<6){const power=selected===2&&inv.pickaxe?20:5;bd.hp-=power;pop(bd.mesh.position,'BED '+Math.max(0,bd.hp));if(bd.hp<=0)destroyBed(t,'You');return}}}
 function hurtPlayer(raw,from){const dmg=Math.max(1,Math.round(raw*armorMult(inv.armor)));health-=dmg;lastHealthRegen=performance.now();pop(player.position,'-'+dmg);if(from){const d=player.position.clone().sub(from).setY(0);if(d.lengthSq()>0.0001){d.normalize();/* Bot hits may knock you back, but they NEVER teleport you. */const kb=Math.min(0.82,Math.max(0.25,1.35));kbx=d.x*kb;kbz=d.z*kb;}else{kbx=0;kbz=0}vy=.20}ui();if(health<=0)playerDeath()}
 function destroyBed(t,by){if(!beds[t].alive)return;beds[t].alive=false;beds[t].mesh.visible=false;kill(by+' destroyed '+TEAM[t].name+' Bed!');toast(TEAM[t].name+' BED DESTROYED!');ui();checkWin()}
 function botDeath(b,by){b.dead=true;b.mesh.visible=false;if(!beds[b.team].alive){b.final=true;kill(by+' FINAL KILL — '+TEAM[b.team].name+' Bot');checkWin()}else{kill(by+' eliminated '+TEAM[b.team].name+' Bot');b.respawnAt=performance.now()+4000}}
-function playerDeath(){if(isDead)return;isDead=true;player.visible=false;if(!beds.blue.alive){finalDead=true;document.getElementById('deathTitle').textContent='FINAL KILL';document.getElementById('deathText').textContent='Your bed is destroyed. You are eliminated.';document.getElementById('again').style.display='inline-block';document.getElementById('death').style.display='flex';matchOver=true;return}document.getElementById('deathTitle').textContent='YOU DIED';document.getElementById('deathText').textContent='Respawning in 4...';document.getElementById('death').style.display='flex';let n=4;const id=setInterval(()=>{n--;document.getElementById('deathText').textContent='Respawning in '+n+'...';if(n<=0){clearInterval(id);health=100;lastHealthRegen=performance.now();isDead=false;player.visible=true;player.position.set(0,0,135);vy=kbx=kbz=0;document.getElementById('death').style.display='none';ui()}},1000)}
+function playerDeath(){if(isDead)return;isDead=true;player.visible=false;sendLocalPlayerState(true);const team=myTeam();if(!beds[team].alive){finalDead=true;document.getElementById('deathTitle').textContent='FINAL KILL';document.getElementById('deathText').textContent='Your bed is destroyed. You are eliminated.';document.getElementById('again').style.display='inline-block';document.getElementById('death').style.display='flex';matchOver=true;return}document.getElementById('deathTitle').textContent='YOU DIED';document.getElementById('deathText').textContent='Respawning in 4...';document.getElementById('death').style.display='flex';let n=4;const id=setInterval(()=>{n--;document.getElementById('deathText').textContent='Respawning in '+n+'...';if(n<=0){clearInterval(id);health=100;lastHealthRegen=performance.now();isDead=false;player.visible=true;player.position.copy(teamSpawn(team));vy=kbx=kbz=0;document.getElementById('death').style.display='none';sendLocalPlayerState(true);ui()}},1000)}
 function eat(){if(inv.gapples<=0||health>=100)return;inv.gapples--;health=Math.min(100,health+30);toast('+30 HP');ui()}
 function shootArrow(owner,targetPos,botOwner=false){const start=(botOwner?owner.mesh.position:player.position).clone().add(new THREE.Vector3(0,3,0));const a=box(.12,.12,.7,0x8b5a2b);a.position.copy(start);a.lookAt(targetPos);scene.add(a);arrows.push({mesh:a,vel:targetPos.clone().sub(start).normalize().multiplyScalar(.85),owner,botOwner,life:120});}
 function fireball(){if(inv.fireballs<=0)return;inv.fireballs--;const start=player.position.clone().add(new THREE.Vector3(0,3,0));const m=new THREE.Mesh(new THREE.SphereGeometry(.45,12,12),material(0xff6b22));m.position.copy(start);scene.add(m);const dir=new THREE.Vector3(0,0,-1).applyAxisAngle(new THREE.Vector3(0,1,0),player.rotation.y);fireballs.push({mesh:m,vel:dir.multiplyScalar(.7),life:100});ui()}
@@ -839,10 +1015,10 @@ function updatePlayer(){
     health=Math.min(100,health+5*ticks);
     lastHealthRegen=now;
   }
-  if(upgrades.heal>0&&player.position.distanceTo(new THREE.Vector3(TEAM.blue.x,0,TEAM.blue.z))<20&&health<100){
+  if(upgrades.heal>0&&player.position.distanceTo(new THREE.Vector3(TEAM[myTeam()].x,0,TEAM[myTeam()].z))<20&&health<100){
     health=Math.min(100,health+(upgrades.heal===1?.04:upgrades.heal===2?.075:.11));
-  }/* Safety: combat knockback is velocity, never a teleport. */kbx=Math.max(-0.82,Math.min(0.82,kbx));kbz=Math.max(-0.82,Math.min(0.82,kbz));kbx*=.82;kbz*=.82;player.position.x+=kbx;player.position.z+=kbz;let ix=0,iz=0;if(keys.KeyW)iz-=1;if(keys.KeyS)iz+=1;if(keys.KeyA)ix-=1;if(keys.KeyD)ix+=1;const moving=ix!==0||iz!==0;if(moving){const inp=new THREE.Vector3(ix,0,iz).normalize();const f=new THREE.Vector3(-Math.sin(camYaw),0,-Math.cos(camYaw));const r=new THREE.Vector3(Math.cos(camYaw),0,-Math.sin(camYaw));const dir=new THREE.Vector3().addScaledVector(f,-inp.z).addScaledVector(r,inp.x).normalize();const speed=.30;player.position.addScaledVector(dir,speed);if(!shiftLock)player.rotation.y=Math.atan2(dir.x,dir.z)}if(shiftLock)player.rotation.y=camYaw;const gh=groundHeight(player.position.x,player.position.z);if(keys.Space&&grounded&&gh!==null){vy=.34;grounded=false}player.position.y+=vy;if(gh!==null&&player.position.y<=gh){player.position.y=gh;vy=0;grounded=true}else{vy-=.018;grounded=false}if(player.position.y<=-8&&!isDead){health=0;player.position.y=-100;playerDeath();return}if(moving&&grounded){walkT+=.18;const sw=Math.sin(walkT)*.7;player.rig.la.rotation.x=sw;if(!swing)player.rig.ra.rotation.x=-sw;player.rig.ll.rotation.x=-sw;player.rig.rl.rotation.x=sw}else if(!swing){player.rig.la.rotation.x=0;player.rig.ra.rotation.x=0;player.rig.ll.rotation.x=0;player.rig.rl.rotation.x=0}if(swing){swingP+=.08;if(swingP>=1){swing=false;swingP=0;player.rig.ra.rotation.set(0,0,0)}else{const a=Math.sin(swingP*Math.PI);player.rig.ra.rotation.x=-a*1.7;player.rig.ra.rotation.y=-a*.9}}if(upgrades.heal&&player.position.distanceTo(TEAM.blue) < 20&&health<100){health=Math.min(100,health+.025)}}
+  }/* Safety: combat knockback is velocity, never a teleport. */kbx=Math.max(-0.82,Math.min(0.82,kbx));kbz=Math.max(-0.82,Math.min(0.82,kbz));kbx*=.82;kbz*=.82;player.position.x+=kbx;player.position.z+=kbz;let ix=0,iz=0;if(keys.KeyW)iz-=1;if(keys.KeyS)iz+=1;if(keys.KeyA)ix-=1;if(keys.KeyD)ix+=1;const moving=ix!==0||iz!==0;if(moving){const inp=new THREE.Vector3(ix,0,iz).normalize();const f=new THREE.Vector3(-Math.sin(camYaw),0,-Math.cos(camYaw));const r=new THREE.Vector3(Math.cos(camYaw),0,-Math.sin(camYaw));const dir=new THREE.Vector3().addScaledVector(f,-inp.z).addScaledVector(r,inp.x).normalize();const speed=.30;player.position.addScaledVector(dir,speed);if(!shiftLock)player.rotation.y=Math.atan2(dir.x,dir.z)}if(shiftLock)player.rotation.y=camYaw;const gh=groundHeight(player.position.x,player.position.z);if(keys.Space&&grounded&&gh!==null){vy=.34;grounded=false}player.position.y+=vy;if(gh!==null&&player.position.y<=gh){player.position.y=gh;vy=0;grounded=true}else{vy-=.018;grounded=false}if(player.position.y<=-8&&!isDead){health=0;player.position.y=-100;playerDeath();return}if(moving&&grounded){walkT+=.18;const sw=Math.sin(walkT)*.7;player.rig.la.rotation.x=sw;if(!swing)player.rig.ra.rotation.x=-sw;player.rig.ll.rotation.x=-sw;player.rig.rl.rotation.x=sw}else if(!swing){player.rig.la.rotation.x=0;player.rig.ra.rotation.x=0;player.rig.ll.rotation.x=0;player.rig.rl.rotation.x=0}if(swing){swingP+=.08;if(swingP>=1){swing=false;swingP=0;player.rig.ra.rotation.set(0,0,0)}else{const a=Math.sin(swingP*Math.PI);player.rig.ra.rotation.x=-a*1.7;player.rig.ra.rotation.y=-a*.9}}if(upgrades.heal&&player.position.distanceTo(new THREE.Vector3(TEAM[myTeam()].x,0,TEAM[myTeam()].z))<20&&health<100){health=Math.min(100,health+.025)}}
 function updateProjectiles(){for(let i=arrows.length-1;i>=0;i--){const a=arrows[i];a.mesh.position.add(a.vel);a.life--;for(const b of bots){if(!b.dead&&!b.final&&a.mesh.position.distanceTo(b.mesh.position.clone().add(new THREE.Vector3(0,2,0)))<2){hitBot(b,12,a.botOwner?a.owner.mesh.position:player.position);a.life=0;break}}if(a.life<=0){scene.remove(a.mesh);arrows.splice(i,1)}}for(let i=fireballs.length-1;i>=0;i--){const f=fireballs[i];f.mesh.position.add(f.vel);f.life--;for(const b of bots){if(!b.dead&&!b.final&&f.mesh.position.distanceTo(b.mesh.position)<5){b.hp-=25;const d=b.mesh.position.clone().sub(f.mesh.position).setY(0).normalize();b.kbx=d.x*3;b.kbz=d.z*3;b.vy=.4;if(b.hp<=0)botDeath(b,'Fireball');f.life=0;break}}if(f.life<=0){scene.remove(f.mesh);fireballs.splice(i,1)}}for(let i=tnts.length-1;i>=0;i--){const t=tnts[i];if(performance.now()>t.at){for(const b of bots){if(b.mesh.position.distanceTo(t.mesh.position)<10){b.hp-=35;if(b.hp<=0)botDeath(b,'TNT')}}for(const bl of blocks){if(bl.position.distanceTo(t.mesh.position)<8&&bl.userData.breakable)bl.visible=false}scene.remove(t.mesh);tnts.splice(i,1);toast('BOOM!')}}}
-function animate(){requestAnimationFrame(animate);if(gameStarted&&!matchOver){collect();updatePlayer();updateBots();updateProjectiles();updateMining();updateAlarm();ui();updateUpgradeUI();updateBuildPreview();const n=nearNPC();const hint=document.getElementById('hint');const guide=document.getElementById('guide');if(n&&!shopOpen&&!upgradeOpen){hint.style.display='block';hint.textContent=n.userData.type==='shop'?'🛒 CLICK SHOPKEEPER — ITEM SHOP':'⚙️ CLICK UPGRADES NPC — TEAM UPGRADES'}else hint.style.display='none';guide.style.display='block';if(n)guide.textContent=n.userData.type==='shop'?'You are at the ITEM SHOP':'You are at TEAM UPGRADES';else guide.textContent=selected===3?'🧱 BUILD MODE — Left Click = Place • White outline = placement':selected===2?'⛏️ PICKAXE — Hold Left Click on a placed block to mine it':'WASD Move • Space Jump • Shift Lock • V First Person • B Fullscreen';document.getElementById('location').textContent=player.position.z>70?'BLUE BASE':player.position.z<-70?'RED BASE':player.position.x>70?'GREEN BASE':player.position.x<-70?'YELLOW BASE':'MID';document.getElementById('location').style.display='block'}if(firstPerson){player.visible=false;const eye=player.position.clone().add(new THREE.Vector3(0,4.55,0));const dir=new THREE.Vector3(-Math.sin(camYaw)*Math.cos(camPitch),Math.sin(camPitch),-Math.cos(camYaw)*Math.cos(camPitch));camera.position.copy(eye);camera.lookAt(eye.clone().addScaledVector(dir,50))}else{player.visible=true;const center=player.position.clone().add(new THREE.Vector3(0,3,0));if(shiftLock)center.add(new THREE.Vector3(1.2,0,0).applyAxisAngle(new THREE.Vector3(0,1,0),camYaw));camera.position.set(center.x+camDist*Math.sin(camYaw)*Math.cos(camPitch),Math.max(-15,center.y-camDist*Math.sin(camPitch)),center.z+camDist*Math.cos(camYaw)*Math.cos(camPitch));camera.lookAt(center)}renderer.render(scene,camera)}animate();
+function animate(){requestAnimationFrame(animate);if(gameStarted&&!matchOver){collect();updatePlayer();updateBots();updateProjectiles();updateMining();updateAlarm();updateRemotePlayers();sendLocalPlayerState();ui();updateUpgradeUI();updateBuildPreview();const n=nearNPC();const hint=document.getElementById('hint');const guide=document.getElementById('guide');if(n&&!shopOpen&&!upgradeOpen){hint.style.display='block';hint.textContent=n.userData.type==='shop'?'🛒 CLICK SHOPKEEPER — ITEM SHOP':'⚙️ CLICK UPGRADES NPC — TEAM UPGRADES'}else hint.style.display='none';guide.style.display='block';if(n)guide.textContent=n.userData.type==='shop'?'You are at the ITEM SHOP':'You are at TEAM UPGRADES';else guide.textContent=selected===3?'🧱 BUILD MODE — Left Click = Place • White outline = placement':selected===2?'⛏️ PICKAXE — Hold Left Click on a placed block to mine it':'WASD Move • Space Jump • Shift Lock • V First Person • B Fullscreen';document.getElementById('location').textContent=player.position.z>70?'BLUE BASE':player.position.z<-70?'RED BASE':player.position.x>70?'GREEN BASE':player.position.x<-70?'YELLOW BASE':'MID';document.getElementById('location').style.display='block'}if(firstPerson){player.visible=false;const eye=player.position.clone().add(new THREE.Vector3(0,4.55,0));const dir=new THREE.Vector3(-Math.sin(camYaw)*Math.cos(camPitch),Math.sin(camPitch),-Math.cos(camYaw)*Math.cos(camPitch));camera.position.copy(eye);camera.lookAt(eye.clone().addScaledVector(dir,50))}else{player.visible=true;const center=player.position.clone().add(new THREE.Vector3(0,3,0));if(shiftLock)center.add(new THREE.Vector3(1.2,0,0).applyAxisAngle(new THREE.Vector3(0,1,0),camYaw));camera.position.set(center.x+camDist*Math.sin(camYaw)*Math.cos(camPitch),Math.max(-15,center.y-camDist*Math.sin(camPitch)),center.z+camDist*Math.cos(camYaw)*Math.cos(camPitch));camera.lookAt(center)}renderer.render(scene,camera)}animate();
 addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight)});selectSlot(1);ui();
 </script></body></html>
