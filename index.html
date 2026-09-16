@@ -90,6 +90,9 @@
   .partyBottom{grid-template-columns:1fr}.brandBlock h1{letter-spacing:-1px}
 }
 
+
+#netBadge{position:absolute;left:14px;bottom:14px;z-index:60;display:none;padding:7px 10px;border-radius:8px;background:#06121ddd;border:1px solid #36d98a66;color:#78ffad;font:900 11px monospace;pointer-events:none}
+
 </style>
 </head>
 <body>
@@ -165,10 +168,10 @@
       </div>
     </div>
 
-    <div class="lobbyFinePrint">Firebase live multiplayer connected: party codes, team assignments, match start, player spawning, player position, rotation, movement animation, held-item state, armor display, and disconnect/removal are synchronized across browsers. Combat and shared world actions are the next networking step.</div>
+    <div class="lobbyFinePrint">Firebase live multiplayer v2: each player reads their assigned team directly from Firebase before spawning. Remote player movement now listens to individual Firebase player add/change/remove events, with a dedicated 100ms network publisher for more reliable two-device synchronization.</div>
   </div>
 </div>
-<div id="hud"><div class="teamTitle" id="teamTitle">BLUE TEAM</div><div>HP: <span id="hp">100</span>/100</div><div class="bar"><div id="hpbar"></div></div><div class="res iron">Iron: <span id="iron">0</span></div><div class="res gold">Gold: <span id="gold">0</span></div><div class="res dia">Diamonds: <span id="diamonds">0</span></div><div class="res emer">Emeralds: <span id="emeralds">0</span></div><div>Armor: <span id="armor">Leather</span></div><div>Bed: <span id="bed">ALIVE</span></div><div class="help">🛒 PURPLE NPC = ITEM SHOP • click him</div><div class="help">⚙ GREEN NPC = TEAM UPGRADES • click him</div><div class="help">🛏️ Protect your team bed and eliminate opposing players.</div></div>
+<div id="netBadge">FIREBASE LIVE</div><div id="hud"><div class="teamTitle" id="teamTitle">BLUE TEAM</div><div>HP: <span id="hp">100</span>/100</div><div class="bar"><div id="hpbar"></div></div><div class="res iron">Iron: <span id="iron">0</span></div><div class="res gold">Gold: <span id="gold">0</span></div><div class="res dia">Diamonds: <span id="diamonds">0</span></div><div class="res emer">Emeralds: <span id="emeralds">0</span></div><div>Armor: <span id="armor">Leather</span></div><div>Bed: <span id="bed">ALIVE</span></div><div class="help">🛒 PURPLE NPC = ITEM SHOP • click him</div><div class="help">⚙ GREEN NPC = TEAM UPGRADES • click him</div><div class="help">🛏️ Protect your team bed and eliminate opposing players.</div></div>
 <div id="score"></div><div id="location">BLUE BASE</div><div id="guide"></div>
 <div id="hotbar">
 <div class="slot active" id="s1" onclick="selectSlot(1);event.stopPropagation()"><span class="key">1</span><span class="ico">⚔️</span><span id="swordLabel">Wood Sword</span></div>
@@ -276,6 +279,12 @@ const auth = firebase.auth();
 const db = firebase.database();
 
 let firebaseUser = null;
+// Every open game window gets its own player identity.
+// This prevents two tabs using the same Firebase anonymous UID from becoming
+// the same BedWars player.
+const playerSessionId = (crypto.randomUUID
+  ? crypto.randomUUID()
+  : 'p_'+Date.now()+'_'+Math.random().toString(36).slice(2)).replace(/[^a-zA-Z0-9_-]/g,'');
 let lobbyState = {code:null,isHost:false,name:'',team:null};
 let roomListenerRef = null;
 let roomListenerHandler = null;
@@ -322,17 +331,24 @@ function slotId(team){return 'slot'+team.charAt(0).toUpperCase()+team.slice(1)}
 function renderRoom(room){
   if(!room)return;
   const players=room.players||{};
+
+  // Always take this client's actual team from Firebase, not from a local default.
+  const me=players[playerSessionId];
+  if(me?.team)lobbyState.team=me.team;
+
   for(const team of teamKeys){
     const p=Object.values(players).find(x=>x.team===team);
     const el=document.getElementById(slotId(team));
-    if(el) el.textContent=p ? `${p.name}${p.uid===room.hostUid?' • Host':''}` : 'Open slot';
+    if(el) el.textContent=p ? `${p.name}${p.playerId===room.hostPlayerId?' • Host':''}` : 'Open slot';
   }
+
   const count=Object.keys(players).length;
   const status=document.getElementById('partyStatus');
-  if(status) status.textContent=`FIREBASE LIVE • ${count}/4 PLAYERS • ${room.status==='playing'?'MATCH STARTING':'WAITING IN LOBBY'}`;
+  if(status) status.textContent=`FIREBASE LIVE • ${count}/4 PLAYERS • YOU: ${teamName(lobbyState.team).toUpperCase()} • ${room.status==='playing'?'MATCH STARTING':'WAITING IN LOBBY'}`;
+
   if(room.status==='playing'&&!matchAlreadyStarted){
     matchAlreadyStarted=true;
-    startGame();
+    startGameFromFirebase();
   }
 }
 
@@ -354,6 +370,10 @@ function listenToRoom(code){
 
 async function openPartyLobby(code,isHost,name,team){
   lobbyState={code,isHost,name,team};
+  try{
+    const snap=await db.ref(`rooms/${code}/players/${playerSessionId}`).once('value');
+    if(snap.exists()&&snap.val()?.team)lobbyState.team=snap.val().team;
+  }catch(err){console.error('Team verification error:',err)}
   document.getElementById('partyCodeText').textContent=code;
   document.getElementById('partyLobby').style.display='block';
   document.getElementById('hostBadge').textContent=isHost?'HOST':'MEMBER';
@@ -376,7 +396,8 @@ async function createParty(){
     if(exists)throw new Error('Could not create unique room code');
 
     const playerData={
-      uid:user.uid,
+      playerId:playerSessionId,
+      authUid:user.uid,
       name,
       team:'blue',
       ready:true,
@@ -386,12 +407,13 @@ async function createParty(){
 
     await roomRef.set({
       hostUid:user.uid,
+      hostPlayerId:playerSessionId,
       status:'lobby',
       createdAt:firebase.database.ServerValue.TIMESTAMP,
-      players:{[user.uid]:playerData}
+      players:{[playerSessionId]:playerData}
     });
 
-    db.ref(`rooms/${code}/players/${user.uid}`).onDisconnect().remove();
+    db.ref(`rooms/${code}/players/${playerSessionId}`).onDisconnect().remove();
     await openPartyLobby(code,true,name,'blue');
     toast('Party created — share the code!');
   }catch(err){
@@ -413,8 +435,8 @@ async function joinParty(){
     if(room.status!=='lobby'){toast('That match already started');return}
 
     const players=room.players||{};
-    if(players[user.uid]){
-      await openPartyLobby(code,room.hostUid===user.uid,name,players[user.uid].team);
+    if(players[playerSessionId]){
+      await openPartyLobby(code,room.hostPlayerId===playerSessionId,name,players[playerSessionId].team);
       return;
     }
 
@@ -422,9 +444,10 @@ async function joinParty(){
     const openTeam=teamKeys.find(t=>!usedTeams.has(t));
     if(!openTeam){toast('Party is full');return}
 
-    const playerRef=db.ref(`rooms/${code}/players/${user.uid}`);
+    const playerRef=db.ref(`rooms/${code}/players/${playerSessionId}`);
     await playerRef.set({
-      uid:user.uid,
+      playerId:playerSessionId,
+      authUid:user.uid,
       name,
       team:openTeam,
       ready:true,
@@ -456,7 +479,7 @@ async function leaveParty(removeFromFirebase=true){
     if(old.isHost){
       await db.ref('rooms/'+old.code).remove();
     }else{
-      await db.ref(`rooms/${old.code}/players/${firebaseUser.uid}`).remove();
+      await db.ref(`rooms/${old.code}/players/${playerSessionId}`).remove();
     }
   }catch(err){console.error(err)}
 }
@@ -548,6 +571,7 @@ function makeRemotePlayer(uid,data){
 }
 
 function updateRemoteRecord(uid,data){
+  if(!data||!data.team)return;
   let r=remotePlayers[uid];
   if(!r || r.team!==data.team || r.name!==(data.name||'Player')){
     if(r)removeRemotePlayer(uid);
@@ -572,26 +596,31 @@ function updateRemoteRecord(uid,data){
   }
 }
 
+let matchChildAdded=null,matchChildChanged=null,matchChildRemoved=null;
+
 function listenToMatchPlayers(){
   if(!lobbyState.code||!firebaseUser)return;
-  if(matchPlayersRef&&matchPlayersHandler)matchPlayersRef.off('value',matchPlayersHandler);
 
+  stopMatchPlayerSync(false);
   matchPlayersRef=db.ref(`rooms/${lobbyState.code}/players`);
-  matchPlayersHandler=snap=>{
-    const data=snap.val()||{};
-    const seen=new Set();
 
-    for(const [uid,p] of Object.entries(data)){
-      if(uid===firebaseUser.uid)continue;
-      seen.add(uid);
-      updateRemoteRecord(uid,p||{});
-    }
+  matchChildAdded=matchPlayersRef.on('child_added',snap=>{
+    const uid=snap.key;
+    if(uid===playerSessionId)return;
+    updateRemoteRecord(uid,snap.val()||{});
+  });
 
-    for(const uid of Object.keys(remotePlayers)){
-      if(!seen.has(uid))removeRemotePlayer(uid);
-    }
-  };
-  matchPlayersRef.on('value',matchPlayersHandler);
+  matchChildChanged=matchPlayersRef.on('child_changed',snap=>{
+    const uid=snap.key;
+    if(uid===playerSessionId)return;
+    updateRemoteRecord(uid,snap.val()||{});
+  });
+
+  matchChildRemoved=matchPlayersRef.on('child_removed',snap=>{
+    const uid=snap.key;
+    if(uid===playerSessionId)return;
+    removeRemotePlayer(uid);
+  });
 }
 
 function updateRemotePlayers(){
@@ -629,6 +658,8 @@ function sendLocalPlayerState(force=false){
   lastNetworkSend=now;
 
   const state={
+    playerId:playerSessionId,
+    authUid:firebaseUser.uid,
     x:Number(player.position.x.toFixed(3)),
     y:Number(player.position.y.toFixed(3)),
     z:Number(player.position.z.toFixed(3)),
@@ -639,24 +670,110 @@ function sendLocalPlayerState(force=false){
     armor:inv.armor,
     sword:inv.sword,
     online:true,
-    lastSeen:Date.now()
+    lastSeen:firebase.database.ServerValue.TIMESTAMP
   };
 
-  db.ref(`rooms/${lobbyState.code}/players/${firebaseUser.uid}`)
+  db.ref(`rooms/${lobbyState.code}/players/${playerSessionId}`)
     .update(state)
     .catch(err=>console.error('Player sync error:',err));
 }
 
-function stopMatchPlayerSync(){
-  if(matchPlayersRef&&matchPlayersHandler){
-    matchPlayersRef.off('value',matchPlayersHandler);
+function stopMatchPlayerSync(removeMeshes=true){
+  if(matchPlayersRef){
+    matchPlayersRef.off('child_added');
+    matchPlayersRef.off('child_changed');
+    matchPlayersRef.off('child_removed');
     matchPlayersRef=null;
-    matchPlayersHandler=null;
   }
-  for(const uid of Object.keys(remotePlayers))removeRemotePlayer(uid);
+  matchChildAdded=matchChildChanged=matchChildRemoved=null;
+  if(removeMeshes){
+    for(const uid of Object.keys(remotePlayers))removeRemotePlayer(uid);
+  }
 }
 
-function startGame(){if(gameStarted)return;gameStarted=true;lastHealthRegen=performance.now();lastAlarm=performance.now();document.getElementById('menu').style.display='none';document.getElementById('hud').style.display='block';document.getElementById('score').style.display='block';document.getElementById('hotbar').style.display='flex';document.getElementById('crosshair').style.display='block';const team=myTeam(),spawn=teamSpawn(team);applyTeamAppearance(player,team);player.position.copy(spawn);const toCenter=new THREE.Vector3(-spawn.x,0,-spawn.z);if(toCenter.lengthSq()>0){toCenter.normalize();player.rotation.y=Math.atan2(toCenter.x,toCenter.z)}player.visible=true;firstPerson=false;shiftLock=false;document.getElementById('teamTitle').textContent=TEAM[team].name.toUpperCase()+' TEAM';document.getElementById('teamTitle').style.color='#'+TEAM[team].color.toString(16).padStart(6,'0');const upSection=document.querySelector('#upgrades .section');if(upSection)upSection.textContent='Permanent upgrades for '+TEAM[team].name;document.getElementById('firstPersonBadge').style.display='none';listenToMatchPlayers();sendLocalPlayerState(true);ui();toast(TEAM[team].name+' Team — live players connected!');renderer.domElement.focus()}
+async function resolveMyFirebasePlayer(){
+  if(!lobbyState.code)return null;
+  const snap=await db.ref(`rooms/${lobbyState.code}/players/${playerSessionId}`).once('value');
+  if(!snap.exists())return null;
+  const me=snap.val();
+  if(me?.team)lobbyState.team=me.team;
+  if(me?.name)lobbyState.name=me.name;
+  return me;
+}
+
+async function startGameFromFirebase(){
+  try{
+    const me=await resolveMyFirebasePlayer();
+    if(!me||!me.team){
+      matchAlreadyStarted=false;
+      toast('Could not find your team in Firebase');
+      return;
+    }
+    startGame();
+  }catch(err){
+    console.error('Match start error:',err);
+    matchAlreadyStarted=false;
+    toast('Could not start multiplayer match');
+  }
+}
+
+let networkTimer=null;
+
+function startGame(){
+  if(gameStarted)return;
+
+  const team=lobbyState.team;
+  if(!team||!TEAM[team]){
+    toast('Team assignment missing — rejoin the party');
+    return;
+  }
+
+  gameStarted=true;
+  lastHealthRegen=performance.now();
+  lastAlarm=performance.now();
+
+  document.getElementById('menu').style.display='none';
+  document.getElementById('hud').style.display='block';
+  document.getElementById('score').style.display='block';
+  document.getElementById('hotbar').style.display='flex';
+  document.getElementById('crosshair').style.display='block';document.getElementById('netBadge').style.display='block';document.getElementById('netBadge').textContent='FIREBASE LIVE • '+team.toUpperCase();
+
+  const spawn=teamSpawn(team);
+  applyTeamAppearance(player,team);
+  player.position.copy(spawn);
+
+  const toCenter=new THREE.Vector3(-spawn.x,0,-spawn.z);
+  if(toCenter.lengthSq()>0){
+    toCenter.normalize();
+    player.rotation.y=Math.atan2(toCenter.x,toCenter.z);
+  }
+
+  player.visible=true;
+  firstPerson=false;
+  shiftLock=false;
+
+  const tt=document.getElementById('teamTitle');
+  tt.textContent=TEAM[team].name.toUpperCase()+' TEAM';
+  tt.style.color='#'+TEAM[team].color.toString(16).padStart(6,'0');
+
+  const upSection=document.querySelector('#upgrades .section');
+  if(upSection)upSection.textContent='Permanent upgrades for '+TEAM[team].name;
+
+  document.getElementById('firstPersonBadge').style.display='none';
+
+  listenToMatchPlayers();
+
+  // Publish independently from the render loop so network updates do not stall
+  // if rendering has a temporary hiccup.
+  if(networkTimer)clearInterval(networkTimer);
+  networkTimer=setInterval(()=>sendLocalPlayerState(true),100);
+
+  sendLocalPlayerState(true);
+  ui();
+  toast(TEAM[team].name+' Team — live multiplayer connected!');
+  renderer.domElement.focus();
+}
+
 function nearNPC(){let best=null,bd=7;for(const n of npcs){if(n.userData.team!==myTeam())continue;const d=player.position.distanceTo(n.position);if(d<bd){bd=d;best=n}}return best}
 function openShop(){const n=nearNPC();if(!n){toast('Get closer to the purple Shopkeeper NPC');return}shopOpen=true;document.getElementById('shop').style.display='flex';if(document.pointerLockElement)document.exitPointerLock()}
 function closeShop(){shopOpen=false;document.getElementById('shop').style.display='none'}function openUpgrades(){const n=nearNPC();let u=npcs.find(x=>x.userData.team===myTeam()&&x.userData.type==='upgrade');if(!u||player.position.distanceTo(u.position)>7){toast('Get closer to the green Upgrades NPC');return}upgradeOpen=true;document.getElementById('upgrades').style.display='flex';if(document.pointerLockElement)document.exitPointerLock()}function closeUpgrades(){upgradeOpen=false;document.getElementById('upgrades').style.display='none'}
@@ -1019,6 +1136,6 @@ function updatePlayer(){
     health=Math.min(100,health+(upgrades.heal===1?.04:upgrades.heal===2?.075:.11));
   }/* Safety: combat knockback is velocity, never a teleport. */kbx=Math.max(-0.82,Math.min(0.82,kbx));kbz=Math.max(-0.82,Math.min(0.82,kbz));kbx*=.82;kbz*=.82;player.position.x+=kbx;player.position.z+=kbz;let ix=0,iz=0;if(keys.KeyW)iz-=1;if(keys.KeyS)iz+=1;if(keys.KeyA)ix-=1;if(keys.KeyD)ix+=1;const moving=ix!==0||iz!==0;if(moving){const inp=new THREE.Vector3(ix,0,iz).normalize();const f=new THREE.Vector3(-Math.sin(camYaw),0,-Math.cos(camYaw));const r=new THREE.Vector3(Math.cos(camYaw),0,-Math.sin(camYaw));const dir=new THREE.Vector3().addScaledVector(f,-inp.z).addScaledVector(r,inp.x).normalize();const speed=.30;player.position.addScaledVector(dir,speed);if(!shiftLock)player.rotation.y=Math.atan2(dir.x,dir.z)}if(shiftLock)player.rotation.y=camYaw;const gh=groundHeight(player.position.x,player.position.z);if(keys.Space&&grounded&&gh!==null){vy=.34;grounded=false}player.position.y+=vy;if(gh!==null&&player.position.y<=gh){player.position.y=gh;vy=0;grounded=true}else{vy-=.018;grounded=false}if(player.position.y<=-8&&!isDead){health=0;player.position.y=-100;playerDeath();return}if(moving&&grounded){walkT+=.18;const sw=Math.sin(walkT)*.7;player.rig.la.rotation.x=sw;if(!swing)player.rig.ra.rotation.x=-sw;player.rig.ll.rotation.x=-sw;player.rig.rl.rotation.x=sw}else if(!swing){player.rig.la.rotation.x=0;player.rig.ra.rotation.x=0;player.rig.ll.rotation.x=0;player.rig.rl.rotation.x=0}if(swing){swingP+=.08;if(swingP>=1){swing=false;swingP=0;player.rig.ra.rotation.set(0,0,0)}else{const a=Math.sin(swingP*Math.PI);player.rig.ra.rotation.x=-a*1.7;player.rig.ra.rotation.y=-a*.9}}if(upgrades.heal&&player.position.distanceTo(new THREE.Vector3(TEAM[myTeam()].x,0,TEAM[myTeam()].z))<20&&health<100){health=Math.min(100,health+.025)}}
 function updateProjectiles(){for(let i=arrows.length-1;i>=0;i--){const a=arrows[i];a.mesh.position.add(a.vel);a.life--;for(const b of bots){if(!b.dead&&!b.final&&a.mesh.position.distanceTo(b.mesh.position.clone().add(new THREE.Vector3(0,2,0)))<2){hitBot(b,12,a.botOwner?a.owner.mesh.position:player.position);a.life=0;break}}if(a.life<=0){scene.remove(a.mesh);arrows.splice(i,1)}}for(let i=fireballs.length-1;i>=0;i--){const f=fireballs[i];f.mesh.position.add(f.vel);f.life--;for(const b of bots){if(!b.dead&&!b.final&&f.mesh.position.distanceTo(b.mesh.position)<5){b.hp-=25;const d=b.mesh.position.clone().sub(f.mesh.position).setY(0).normalize();b.kbx=d.x*3;b.kbz=d.z*3;b.vy=.4;if(b.hp<=0)botDeath(b,'Fireball');f.life=0;break}}if(f.life<=0){scene.remove(f.mesh);fireballs.splice(i,1)}}for(let i=tnts.length-1;i>=0;i--){const t=tnts[i];if(performance.now()>t.at){for(const b of bots){if(b.mesh.position.distanceTo(t.mesh.position)<10){b.hp-=35;if(b.hp<=0)botDeath(b,'TNT')}}for(const bl of blocks){if(bl.position.distanceTo(t.mesh.position)<8&&bl.userData.breakable)bl.visible=false}scene.remove(t.mesh);tnts.splice(i,1);toast('BOOM!')}}}
-function animate(){requestAnimationFrame(animate);if(gameStarted&&!matchOver){collect();updatePlayer();updateBots();updateProjectiles();updateMining();updateAlarm();updateRemotePlayers();sendLocalPlayerState();ui();updateUpgradeUI();updateBuildPreview();const n=nearNPC();const hint=document.getElementById('hint');const guide=document.getElementById('guide');if(n&&!shopOpen&&!upgradeOpen){hint.style.display='block';hint.textContent=n.userData.type==='shop'?'🛒 CLICK SHOPKEEPER — ITEM SHOP':'⚙️ CLICK UPGRADES NPC — TEAM UPGRADES'}else hint.style.display='none';guide.style.display='block';if(n)guide.textContent=n.userData.type==='shop'?'You are at the ITEM SHOP':'You are at TEAM UPGRADES';else guide.textContent=selected===3?'🧱 BUILD MODE — Left Click = Place • White outline = placement':selected===2?'⛏️ PICKAXE — Hold Left Click on a placed block to mine it':'WASD Move • Space Jump • Shift Lock • V First Person • B Fullscreen';document.getElementById('location').textContent=player.position.z>70?'BLUE BASE':player.position.z<-70?'RED BASE':player.position.x>70?'GREEN BASE':player.position.x<-70?'YELLOW BASE':'MID';document.getElementById('location').style.display='block'}if(firstPerson){player.visible=false;const eye=player.position.clone().add(new THREE.Vector3(0,4.55,0));const dir=new THREE.Vector3(-Math.sin(camYaw)*Math.cos(camPitch),Math.sin(camPitch),-Math.cos(camYaw)*Math.cos(camPitch));camera.position.copy(eye);camera.lookAt(eye.clone().addScaledVector(dir,50))}else{player.visible=true;const center=player.position.clone().add(new THREE.Vector3(0,3,0));if(shiftLock)center.add(new THREE.Vector3(1.2,0,0).applyAxisAngle(new THREE.Vector3(0,1,0),camYaw));camera.position.set(center.x+camDist*Math.sin(camYaw)*Math.cos(camPitch),Math.max(-15,center.y-camDist*Math.sin(camPitch)),center.z+camDist*Math.cos(camYaw)*Math.cos(camPitch));camera.lookAt(center)}renderer.render(scene,camera)}animate();
+function animate(){requestAnimationFrame(animate);if(gameStarted&&!matchOver){collect();updatePlayer();updateBots();updateProjectiles();updateMining();updateAlarm();updateRemotePlayers();ui();updateUpgradeUI();updateBuildPreview();const n=nearNPC();const hint=document.getElementById('hint');const guide=document.getElementById('guide');if(n&&!shopOpen&&!upgradeOpen){hint.style.display='block';hint.textContent=n.userData.type==='shop'?'🛒 CLICK SHOPKEEPER — ITEM SHOP':'⚙️ CLICK UPGRADES NPC — TEAM UPGRADES'}else hint.style.display='none';guide.style.display='block';if(n)guide.textContent=n.userData.type==='shop'?'You are at the ITEM SHOP':'You are at TEAM UPGRADES';else guide.textContent=selected===3?'🧱 BUILD MODE — Left Click = Place • White outline = placement':selected===2?'⛏️ PICKAXE — Hold Left Click on a placed block to mine it':'WASD Move • Space Jump • Shift Lock • V First Person • B Fullscreen';document.getElementById('location').textContent=player.position.z>70?'BLUE BASE':player.position.z<-70?'RED BASE':player.position.x>70?'GREEN BASE':player.position.x<-70?'YELLOW BASE':'MID';document.getElementById('location').style.display='block'}if(firstPerson){player.visible=false;const eye=player.position.clone().add(new THREE.Vector3(0,4.55,0));const dir=new THREE.Vector3(-Math.sin(camYaw)*Math.cos(camPitch),Math.sin(camPitch),-Math.cos(camYaw)*Math.cos(camPitch));camera.position.copy(eye);camera.lookAt(eye.clone().addScaledVector(dir,50))}else{player.visible=true;const center=player.position.clone().add(new THREE.Vector3(0,3,0));if(shiftLock)center.add(new THREE.Vector3(1.2,0,0).applyAxisAngle(new THREE.Vector3(0,1,0),camYaw));camera.position.set(center.x+camDist*Math.sin(camYaw)*Math.cos(camPitch),Math.max(-15,center.y-camDist*Math.sin(camPitch)),center.z+camDist*Math.cos(camYaw)*Math.cos(camPitch));camera.lookAt(center)}renderer.render(scene,camera)}animate();
 addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight)});selectSlot(1);ui();
 </script></body></html>
