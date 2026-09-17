@@ -168,7 +168,7 @@
       </div>
     </div>
 
-    <div class="lobbyFinePrint">STEP 6 v2 multiplayer: Firebase keeps durable match/world state while a no-wait WebRTC fast lane carries movement, combo hits and projectile events directly between players when available. The HUD shows P2P FAST plus measured round-trip latency when direct mode is active; Firebase remains the automatic fallback.</div>
+    <div class="lobbyFinePrint">STEP 6 v3 multiplayer: Firebase keeps durable match/world state while a no-wait WebRTC fast lane carries movement, combo hits and projectile events directly between players when available. The HUD shows P2P FAST plus measured round-trip latency when direct mode is active; Firebase remains the automatic fallback.</div>
   </div>
 </div>
 <div id="netBadge">FIREBASE LIVE</div><div id="hud"><div class="teamTitle" id="teamTitle">BLUE TEAM</div><div>HP: <span id="hp">100</span>/100</div><div class="bar"><div id="hpbar"></div></div><div class="res iron">Iron: <span id="iron">0</span></div><div class="res gold">Gold: <span id="gold">0</span></div><div class="res dia">Diamonds: <span id="diamonds">0</span></div><div class="res emer">Emeralds: <span id="emeralds">0</span></div><div>Armor: <span id="armor">Leather</span></div><div>Bed: <span id="bed">ALIVE</span></div><div class="help">🛒 PURPLE NPC = ITEM SHOP • click him</div><div class="help">⚙ GREEN NPC = TEAM UPGRADES • click him</div><div class="help">🛏️ Protect your team bed and eliminate opposing players.</div></div>
@@ -525,8 +525,11 @@ let lastNetworkPosition = null;
 let lastNetworkRotation = null;
 let lastNetworkSignature = '';
 let attackSeq = 0;
+let lastMeleeAttackAt = 0;
 let combatEventsRef = null;
 let combatChildAdded = null;
+let sharedHitsRef = null;
+let sharedHitAdded = null;
 let matchEventsRef = null;
 let matchEventChildAdded = null;
 let combatListenStartedAt = 0;
@@ -558,7 +561,7 @@ function updateNetworkBadge(){
     const rtt=samples.length?Math.round(samples.reduce((a,b)=>a+b,0)/samples.length):null;
     el.textContent=`P2P FAST • ${myTeam().toUpperCase()} • ${open.length} DIRECT${rtt!==null?' • '+rtt+'ms':''}`;
   }else{
-    el.textContent=`FIREBASE LIVE • ${myTeam().toUpperCase()} • FALLBACK`;
+    el.textContent=`FIREBASE FAST • ${myTeam().toUpperCase()} • FALLBACK`;
   }
 }
 function sendFastToPeer(uid,msg,critical=false){
@@ -885,7 +888,9 @@ function updateRemotePlayers(){
     // STEP 6 fallback smoothing: predict a short distance ahead from the latest velocity.
     // This cannot remove real internet latency, but it stops remote players from looking
     // like they freeze for a packet and then jump to the next Firebase position.
-    const predictSeconds=Math.min(.16,.055+r.packetInterval*.55+Math.min(age,.06));
+    const directFresh=r.fastPacketAt>0&&(now-r.fastPacketAt)<650;
+    const predictCap=directFresh?.14:.24;
+    const predictSeconds=Math.min(predictCap,.060+r.packetInterval*.72+Math.min(age,.10));
     const predicted=r.target.clone();
     if(age<.45)predicted.addScaledVector(r.velocity,predictSeconds);
 
@@ -919,7 +924,7 @@ function updateRemotePlayers(){
       }
 
       if(r.swing){
-        r.swingP+=.10;
+        r.swingP+=.13;
         if(r.swingP>=1){
           r.swing=false;
           r.swingP=0;
@@ -938,7 +943,7 @@ function sendLocalPlayerState(force=false){
   if(!gameStarted||!lobbyState.code||!firebaseUser)return;
   if(force)sendLocalFastState(true);
   const now=performance.now();
-  const fbInterval=openFastPeerCount()>0?180:70; // P2P open = light backup; no P2P = faster Firebase fallback
+  const fbInterval=openFastPeerCount()>0?180:50; // P2P open = light backup; fallback = ~20 Hz for smoother long-distance play
   if(!force&&now-lastNetworkSend<fbInterval)return;
 
   const pos=player.position;
@@ -948,7 +953,7 @@ function sendLocalPlayerState(force=false){
   let rotated=true;
   if(lastNetworkRotation!==null){let rd=player.rotation.y-lastNetworkRotation;rd=Math.atan2(Math.sin(rd),Math.cos(rd));rotated=Math.abs(rd)>.018;}
   const changed=signature!==lastNetworkSignature;
-  const heartbeat=now-lastNetworkHeartbeat>=(openFastPeerCount()>0?1200:450);
+  const heartbeat=now-lastNetworkHeartbeat>=(openFastPeerCount()>0?1200:320);
   if(!force&&!moved&&!rotated&&!changed&&!heartbeat)return;
 
   const dt=Math.max(.016,Math.min(.7,(now-lastNetworkSend)/1000||.09));
@@ -971,8 +976,9 @@ function newNetId(prefix='e'){return (prefix+'_'+playerSessionId+'_'+Date.now()+
 
 function stopCombatSync(){
   if(combatEventsRef){combatEventsRef.off('child_added',combatChildAdded);combatEventsRef=null;}
+  if(sharedHitsRef){sharedHitsRef.off('child_added',sharedHitAdded);sharedHitsRef=null;}
   if(matchEventsRef){matchEventsRef.off('child_added',matchEventChildAdded);matchEventsRef=null;}
-  combatChildAdded=null;matchEventChildAdded=null;
+  combatChildAdded=null;sharedHitAdded=null;matchEventChildAdded=null;
 }
 function publishMatchEvent(text,type='info'){
   if(!lobbyState.code||!firebaseUser)return;
@@ -1003,16 +1009,37 @@ function applyIncomingPlayerHit(evt){
 function startCombatSync(){
   if(!lobbyState.code||!firebaseUser)return;
   stopCombatSync();combatListenStartedAt=Date.now();
-  // Listen only to THIS player's inbox. This is lighter/faster than every client
-  // listening to one giant global combat event list.
+
+  // STEP 6 v3 PRIMARY FALLBACK: use the same shared /world branch already proven
+  // to work for arrows, fireballs and TNT. Every client hears the event, but only
+  // the named victim applies the damage. processedHitIds prevents P2P/Firebase doubles.
+  sharedHitsRef=db.ref(`rooms/${lobbyState.code}/world/hits`);
+  sharedHitAdded=sharedHitsRef.on('child_added',snap=>{
+    const evt={hitId:snap.key,...(snap.val()||{})};
+    const created=Number(evt.createdAt)||Number(evt.serverAt)||0;
+    if(created&&created<combatListenStartedAt-5000){
+      if(evt.attackerId===playerSessionId)snap.ref.remove().catch(()=>{});
+      return;
+    }
+    if(evt.victimId===playerSessionId){
+      applyIncomingPlayerHit(evt);
+      // Victim cleans up after consuming it. If this remove is delayed, duplicate
+      // delivery is still harmless because rememberHit() deduplicates by hitId.
+      snap.ref.remove().catch(()=>{});
+    }
+  });
+
+  // Legacy per-player inbox listener remains for compatibility with older builds,
+  // but v3 no longer depends on it for new sword hits.
   combatEventsRef=db.ref(`rooms/${lobbyState.code}/combatInbox/${playerSessionId}`);
   combatChildAdded=combatEventsRef.on('child_added',snap=>{
     const evt=snap.val()||{};
     const created=Number(evt.createdAt)||0;
     if(created&&created<combatListenStartedAt-4000){snap.ref.remove().catch(()=>{});return;}
     applyIncomingPlayerHit(evt);
-    snap.ref.remove().catch(err=>console.error('Combat cleanup error:',err));
+    snap.ref.remove().catch(()=>{});
   });
+
   matchEventsRef=db.ref(`rooms/${lobbyState.code}/matchEvents`);
   matchEventChildAdded=matchEventsRef.on('child_added',snap=>{
     const evt=snap.val()||{};const created=Number(evt.createdAt)||0;
@@ -1020,6 +1047,7 @@ function startCombatSync(){
     if(evt.text)kill(evt.text);
   });
 }
+
 function predictRemoteKnockback(target,source='sword'){
   if(!target?.mesh)return;
   const d=target.mesh.position.clone().sub(player.position).setY(0);
@@ -1040,11 +1068,18 @@ function sendPlayerHit(target,rawDamage,source='sword',forcedHitId=null,opts={})
     verticalKb:Number.isFinite(Number(opts.verticalKb))?Number(opts.verticalKb):undefined,
     createdAt:Date.now()};
 
-  // Direct first: usually arrives much sooner for players in different countries.
+  // Fastest path when WebRTC is available.
   sendFastToPeer(target.uid,{t:'hit',e:hit},true);
-  // Firebase backup guarantees the hit still arrives if WebRTC is blocked by NAT/firewall.
-  db.ref(`rooms/${lobbyState.code}/combatInbox/${target.uid}/${hitId}`).set({...hit,serverAt:firebase.database.ServerValue.TIMESTAMP})
-    .catch(err=>console.error('Combat hit send error:',err));
+
+  // Guaranteed Firebase fallback: use /world/hits because this same branch is already
+  // working in your live tests for projectile synchronization.
+  const hitRef=db.ref(`rooms/${lobbyState.code}/world/hits/${hitId}`);
+  hitRef.set({...hit,serverAt:firebase.database.ServerValue.TIMESTAMP})
+    .then(()=>setTimeout(()=>hitRef.remove().catch(()=>{}),5000))
+    .catch(err=>console.error('Shared melee hit send error:',err));
+
+  // Attacker-side prediction makes combos feel immediate even before the victim's
+  // Firebase response comes back across countries.
   predictRemoteKnockback(target,source);
   return true;
 }
@@ -1680,23 +1715,34 @@ function collect(){
 function armorMult(a){const base=[1,.82,.67][a]||1;const prot=[1,.94,.88,.82][upgrades.prot]||1;return base*prot}function swordDamage(s){return [10,13,16,21][s]+upgrades.sharp}
 function hitBot(b,dmg,from){b.hp-=Math.round(dmg*armorMult(b.armor));pop(b.mesh.position,'-'+Math.round(dmg*armorMult(b.armor)));const dir=b.mesh.position.clone().sub(from).setY(0).normalize();b.kbx=dir.x*1.5;b.kbz=dir.z*1.5;b.vy=.24;if(b.hp<=0)botDeath(b,'You')}
 function attack(){
-  if(isDead||swing||selected>2)return;
+  if(isDead||selected>2)return;
+  const now=performance.now();
+  const attackCooldown=selected===2?190:145;
+  if(now-lastMeleeAttackAt<attackCooldown)return;
+  lastMeleeAttackAt=now;
   swing=true;
   swingP=0;
   attackSeq++;
+  sendLocalFastState(true);
   sendLocalPlayerState(true); // makes the remote swing appear immediately
 
   const dmg=selected===2?8:swordDamage(inv.sword);
 
-  // STEP 6: target real multiplayer players using the P2P/Firebase fast combat path.
-  let target=null,dist=6;
+  // Latency-compensated multiplayer melee. Firebase fallback displays a slightly
+  // delayed opponent position, so give fallback a larger horizontal hitbox while
+  // still requiring the players to be at roughly the same vertical level.
+  const meleeRange=openFastPeerCount()>0?6.4:8.2;
+  let target=null,dist=meleeRange;
   for(const r of Object.values(remotePlayers)){
     if(r.dead||r.finalDead||r.team===myTeam()||!r.mesh.visible)continue;
-    const d=player.position.distanceTo(r.mesh.position);
-    if(d<dist){dist=d;target=r}
+    const dx=player.position.x-r.mesh.position.x;
+    const dz=player.position.z-r.mesh.position.z;
+    const horizontal=Math.hypot(dx,dz);
+    const vertical=Math.abs(player.position.y-r.mesh.position.y);
+    if(vertical<=6.5&&horizontal<dist){dist=horizontal;target=r}
   }
   if(target){
-    sendPlayerHit(target,dmg,selected===2?'pickaxe':'sword');
+    sendPlayerHit(target,dmg,selected===2?'pickaxe':'sword',null,{});
     return;
   }
 
@@ -1718,6 +1764,7 @@ function attack(){
     }
   }
 }
+
 function hurtPlayer(raw,from){const dmg=Math.max(1,Math.round(raw*armorMult(inv.armor)));health-=dmg;lastHealthRegen=performance.now();pop(player.position,'-'+dmg);if(from){const d=player.position.clone().sub(from).setY(0);if(d.lengthSq()>0.0001){d.normalize();/* Bot hits may knock you back, but they NEVER teleport you. */const kb=Math.min(0.82,Math.max(0.25,1.35));kbx=d.x*kb;kbz=d.z*kb;}else{kbx=0;kbz=0}vy=.20}ui();if(health<=0)playerDeath()}
 function destroyBed(t,by){if(!beds[t]?.alive)return;damageSharedBed(t,9999,by||lobbyState.name||'Player')}
 function botDeath(b,by){b.dead=true;b.mesh.visible=false;if(!beds[b.team].alive){b.final=true;kill(by+' FINAL KILL — '+TEAM[b.team].name+' Bot');checkWin()}else{kill(by+' eliminated '+TEAM[b.team].name+' Bot');b.respawnAt=performance.now()+4000}}
@@ -1877,7 +1924,7 @@ function updatePlayer(){
   }
   if(upgrades.heal>0&&player.position.distanceTo(new THREE.Vector3(TEAM[myTeam()].x,0,TEAM[myTeam()].z))<20&&health<100){
     health=Math.min(100,health+(upgrades.heal===1?.04:upgrades.heal===2?.075:.11));
-  }/* Safety: combat knockback is velocity, never a teleport. */kbx=Math.max(-0.82,Math.min(0.82,kbx));kbz=Math.max(-0.82,Math.min(0.82,kbz));kbx*=.82;kbz*=.82;player.position.x+=kbx;player.position.z+=kbz;let ix=0,iz=0;if(keys.KeyW)iz-=1;if(keys.KeyS)iz+=1;if(keys.KeyA)ix-=1;if(keys.KeyD)ix+=1;const moving=ix!==0||iz!==0;if(moving){const inp=new THREE.Vector3(ix,0,iz).normalize();const f=new THREE.Vector3(-Math.sin(camYaw),0,-Math.cos(camYaw));const r=new THREE.Vector3(Math.cos(camYaw),0,-Math.sin(camYaw));const dir=new THREE.Vector3().addScaledVector(f,-inp.z).addScaledVector(r,inp.x).normalize();const speed=.30;player.position.addScaledVector(dir,speed);if(!shiftLock)player.rotation.y=Math.atan2(dir.x,dir.z)}if(shiftLock)player.rotation.y=camYaw;const gh=groundHeight(player.position.x,player.position.z);if(keys.Space&&grounded&&gh!==null){vy=.34;grounded=false}player.position.y+=vy;if(gh!==null&&player.position.y<=gh){player.position.y=gh;vy=0;grounded=true}else{vy-=.018;grounded=false}if(player.position.y<=-8&&!isDead){health=0;player.position.y=-100;playerDeath();return}if(moving&&grounded){walkT+=.18;const sw=Math.sin(walkT)*.7;player.rig.la.rotation.x=sw;if(!swing)player.rig.ra.rotation.x=-sw;player.rig.ll.rotation.x=-sw;player.rig.rl.rotation.x=sw}else if(!swing){player.rig.la.rotation.x=0;player.rig.ra.rotation.x=0;player.rig.ll.rotation.x=0;player.rig.rl.rotation.x=0}if(swing){swingP+=.08;if(swingP>=1){swing=false;swingP=0;player.rig.ra.rotation.set(0,0,0)}else{const a=Math.sin(swingP*Math.PI);player.rig.ra.rotation.x=-a*1.7;player.rig.ra.rotation.y=-a*.9}}if(upgrades.heal&&player.position.distanceTo(new THREE.Vector3(TEAM[myTeam()].x,0,TEAM[myTeam()].z))<20&&health<100){health=Math.min(100,health+.025)}}
+  }/* Safety: combat knockback is velocity, never a teleport. */kbx=Math.max(-0.82,Math.min(0.82,kbx));kbz=Math.max(-0.82,Math.min(0.82,kbz));kbx*=.82;kbz*=.82;player.position.x+=kbx;player.position.z+=kbz;let ix=0,iz=0;if(keys.KeyW)iz-=1;if(keys.KeyS)iz+=1;if(keys.KeyA)ix-=1;if(keys.KeyD)ix+=1;const moving=ix!==0||iz!==0;if(moving){const inp=new THREE.Vector3(ix,0,iz).normalize();const f=new THREE.Vector3(-Math.sin(camYaw),0,-Math.cos(camYaw));const r=new THREE.Vector3(Math.cos(camYaw),0,-Math.sin(camYaw));const dir=new THREE.Vector3().addScaledVector(f,-inp.z).addScaledVector(r,inp.x).normalize();const speed=.30;player.position.addScaledVector(dir,speed);if(!shiftLock)player.rotation.y=Math.atan2(dir.x,dir.z)}if(shiftLock)player.rotation.y=camYaw;const gh=groundHeight(player.position.x,player.position.z);if(keys.Space&&grounded&&gh!==null){vy=.34;grounded=false}player.position.y+=vy;if(gh!==null&&player.position.y<=gh){player.position.y=gh;vy=0;grounded=true}else{vy-=.018;grounded=false}if(player.position.y<=-8&&!isDead){health=0;player.position.y=-100;playerDeath();return}if(moving&&grounded){walkT+=.18;const sw=Math.sin(walkT)*.7;player.rig.la.rotation.x=sw;if(!swing)player.rig.ra.rotation.x=-sw;player.rig.ll.rotation.x=-sw;player.rig.rl.rotation.x=sw}else if(!swing){player.rig.la.rotation.x=0;player.rig.ra.rotation.x=0;player.rig.ll.rotation.x=0;player.rig.rl.rotation.x=0}if(swing){swingP+=.12;if(swingP>=1){swing=false;swingP=0;player.rig.ra.rotation.set(0,0,0)}else{const a=Math.sin(swingP*Math.PI);player.rig.ra.rotation.x=-a*1.7;player.rig.ra.rotation.y=-a*.9}}if(upgrades.heal&&player.position.distanceTo(new THREE.Vector3(TEAM[myTeam()].x,0,TEAM[myTeam()].z))<20&&health<100){health=Math.min(100,health+.025)}}
 function updateProjectiles(){
   const nowPerf=performance.now();
   const dt=Math.max(.001,Math.min(.05,(nowPerf-lastProjectileTick)/1000));
