@@ -168,7 +168,7 @@
       </div>
     </div>
 
-    <div class="lobbyFinePrint">STEP 6 v4 STABLE: multiplayer movement, melee, blocks, beds, arrows, fireballs and TNT use a lighter Firebase path. The lobby listener is disconnected once the match begins so gameplay updates do not repeatedly download the whole room. Melee has redundant delivery with hit de-duplication for reliable cross-country play.</div>
+    <div class="lobbyFinePrint">STEP 6 v5 MELEE FIX: multiplayer movement, melee, blocks, beds, arrows, fireballs and TNT use a lighter Firebase path. The lobby listener is disconnected once the match begins so gameplay updates do not repeatedly download the whole room. Melee uses the proven shared-world Firebase path with valid packets and hit de-duplication for reliable cross-country play.</div>
   </div>
 </div>
 <div id="netBadge">FIREBASE LIVE</div><div id="hud"><div class="teamTitle" id="teamTitle">BLUE TEAM</div><div>HP: <span id="hp">100</span>/100</div><div class="bar"><div id="hpbar"></div></div><div class="res iron">Iron: <span id="iron">0</span></div><div class="res gold">Gold: <span id="gold">0</span></div><div class="res dia">Diamonds: <span id="diamonds">0</span></div><div class="res emer">Emeralds: <span id="emeralds">0</span></div><div>Armor: <span id="armor">Leather</span></div><div>Bed: <span id="bed">ALIVE</span></div><div class="help">🛒 PURPLE NPC = ITEM SHOP • click him</div><div class="help">⚙ GREEN NPC = TEAM UPGRADES • click him</div><div class="help">🛏️ Protect your team bed and eliminate opposing players.</div></div>
@@ -886,7 +886,7 @@ function updateRemotePlayers(){
     const before=r.mesh.position.clone();
     const gap=r.mesh.position.distanceTo(r.target);
 
-    // STEP 6 v4 STABLE: follow the latest Firebase position directly.
+    // STEP 6 v5 MELEE FIX: follow the latest Firebase position directly.
     // No velocity prediction/extrapolation: that made high-ping players appear to
     // move slowly, overshoot, and then correct. A stronger interpolation catches up
     // quickly while remaining smooth at the stable 10 Hz network rate.
@@ -1052,32 +1052,43 @@ function sendPlayerHit(target,rawDamage,source='sword',forcedHitId=null,opts={})
   if(!target||target.dead||target.finalDead||target.team===myTeam())return false;
   if(!lobbyState.code||!firebaseUser)return false;
   const hitId=forcedHitId||newNetId('hit');
-  const hit={hitId,attackerId:playerSessionId,attackerName:lobbyState.name||'Player',attackerTeam:myTeam(),
-    victimId:target.uid,victimName:target.name||'Player',victimTeam:target.team,rawDamage:Math.max(1,Math.round(rawDamage)),source,
-    fromX:+player.position.x.toFixed(3),fromY:+player.position.y.toFixed(3),fromZ:+player.position.z.toFixed(3),
-    kbStrength:Number.isFinite(Number(opts.kbStrength))?Number(opts.kbStrength):undefined,
-    verticalKb:Number.isFinite(Number(opts.verticalKb))?Number(opts.verticalKb):undefined,
-    createdAt:Date.now()};
 
-  // STEP 6 v4 RELIABLE MELEE: send the SAME hit id to two lightweight Firebase paths.
-  // The victim listens to both, and rememberHit(hitId) guarantees it can only apply once.
-  // This is intentionally independent of movement updates.
-  const room=db.ref(`rooms/${lobbyState.code}`);
-  const payload={...hit,serverAt:firebase.database.ServerValue.TIMESTAMP};
-  const updates={};
-  updates[`world/hits/${hitId}`]=payload;
-  updates[`combatInbox/${target.uid}/${hitId}`]=payload;
-  room.update(updates).catch(err=>console.error('Melee hit send error:',err));
+  // IMPORTANT: Firebase RTDB rejects payloads containing `undefined` anywhere.
+  // The previous Step 6 v4 packet always included undefined kbStrength/verticalKb
+  // for normal sword hits, causing the ENTIRE melee write to fail while projectiles
+  // kept working. Build the packet only with real values.
+  const payload={
+    hitId,
+    attackerId:playerSessionId,
+    attackerName:lobbyState.name||'Player',
+    attackerTeam:myTeam(),
+    victimId:target.uid,
+    victimName:target.name||'Player',
+    victimTeam:target.team,
+    rawDamage:Math.max(1,Math.round(rawDamage)),
+    source,
+    fromX:+player.position.x.toFixed(3),
+    fromY:+player.position.y.toFixed(3),
+    fromZ:+player.position.z.toFixed(3),
+    createdAt:Date.now(),
+    serverAt:firebase.database.ServerValue.TIMESTAMP
+  };
+  if(Number.isFinite(Number(opts.kbStrength)))payload.kbStrength=Number(opts.kbStrength);
+  if(Number.isFinite(Number(opts.verticalKb)))payload.verticalKb=Number(opts.verticalKb);
 
-  // Attacker-side feedback is immediate; the victim applies the authoritative damage.
+  // Use ONE proven shared-world path. Arrows/fireballs/TNT already use /world
+  // successfully on the tested connection, so melee now rides the same route.
+  const hitRef=db.ref(`rooms/${lobbyState.code}/world/hits/${hitId}`);
+  hitRef.set(payload).then(()=>{
+    setTimeout(()=>hitRef.remove().catch(()=>{}),4500);
+  }).catch(err=>{
+    console.error('Melee hit send error:',err);
+    toast('MELEE NETWORK ERROR');
+  });
+
+  // Immediate attacker feedback; victim remains authoritative for HP/knockback.
   predictRemoteKnockback(target,source);
   pop(target.mesh.position,'⚔ HIT');
-
-  // Clean stale event copies. Usually the victim removes them sooner.
-  setTimeout(()=>{
-    room.child(`world/hits/${hitId}`).remove().catch(()=>{});
-    room.child(`combatInbox/${target.uid}/${hitId}`).remove().catch(()=>{});
-  },4500);
   return true;
 }
 
@@ -1181,7 +1192,7 @@ function startGame(){
   startSharedWorldSync();
   startProjectileSync();
 
-  // STEP 6 v4 STABLE: STUN-only P2P failed on the tested networks, so do not keep
+  // STEP 6 v5 MELEE FIX: STUN-only P2P failed on the tested networks, so do not keep
   // retrying it during the match. A light 10 Hz Firebase movement stream plus forced
   // combat/death sends is more stable and leaves bandwidth for world/combat events.
   stopRtcFastLane();
@@ -1189,7 +1200,7 @@ function startGame(){
   networkTimer=setInterval(()=>sendLocalPlayerState(false),100);
 
   const nb=document.getElementById('netBadge');
-  if(nb)nb.textContent='FIREBASE STABLE • '+team.toUpperCase()+' • 10HZ';
+  if(nb)nb.textContent='FIREBASE STABLE • '+team.toUpperCase()+' • 10HZ • MELEE FIX';
   sendLocalPlayerState(true);
   ui();
   toast(TEAM[team].name+' Team — live multiplayer connected!');
