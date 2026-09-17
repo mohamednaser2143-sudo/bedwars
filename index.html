@@ -168,7 +168,7 @@
       </div>
     </div>
 
-    <div class="lobbyFinePrint">STEP 6 v3 multiplayer: Firebase keeps durable match/world state while a no-wait WebRTC fast lane carries movement, combo hits and projectile events directly between players when available. The HUD shows P2P FAST plus measured round-trip latency when direct mode is active; Firebase remains the automatic fallback.</div>
+    <div class="lobbyFinePrint">STEP 6 v4 STABLE: multiplayer movement, melee, blocks, beds, arrows, fireballs and TNT use a lighter Firebase path. The lobby listener is disconnected once the match begins so gameplay updates do not repeatedly download the whole room. Melee has redundant delivery with hit de-duplication for reliable cross-country play.</div>
   </div>
 </div>
 <div id="netBadge">FIREBASE LIVE</div><div id="hud"><div class="teamTitle" id="teamTitle">BLUE TEAM</div><div>HP: <span id="hp">100</span>/100</div><div class="bar"><div id="hpbar"></div></div><div class="res iron">Iron: <span id="iron">0</span></div><div class="res gold">Gold: <span id="gold">0</span></div><div class="res dia">Diamonds: <span id="diamonds">0</span></div><div class="res emer">Emeralds: <span id="emeralds">0</span></div><div>Armor: <span id="armor">Leather</span></div><div>Bed: <span id="bed">ALIVE</span></div><div class="help">🛒 PURPLE NPC = ITEM SHOP • click him</div><div class="help">⚙ GREEN NPC = TEAM UPGRADES • click him</div><div class="help">🛏️ Protect your team bed and eliminate opposing players.</div></div>
@@ -555,6 +555,7 @@ function openFastPeerCount(){return Object.values(rtcPeers).filter(x=>x.dc?.read
 function updateNetworkBadge(){
   const el=document.getElementById('netBadge');
   if(!el||!gameStarted)return;
+  if(el.textContent.includes('FIREBASE STABLE'))return;
   const open=Object.values(rtcPeers).filter(x=>x.dc?.readyState==='open');
   if(open.length){
     const samples=open.map(x=>Number(x.rtt)).filter(Number.isFinite);
@@ -794,7 +795,8 @@ function makeRemotePlayer(uid,data){
     swing:false,
     swingP:0
   };
-  setTimeout(()=>ensureRtcPeer(uid),0);
+  // STEP 6 v4: do not start WebRTC automatically. STUN-only fallback attempts added
+  // overhead on networks where direct P2P cannot connect. Firebase is the stable path.
   return remotePlayers[uid];
 }
 
@@ -878,34 +880,26 @@ function listenToMatchPlayers(){
 }
 
 function updateRemotePlayers(){
-  const now=performance.now();
   for(const r of Object.values(remotePlayers)){
     if(!r.mesh.visible)continue;
 
     const before=r.mesh.position.clone();
-    const age=Math.max(0,(now-r.packetAt)/1000);
+    const gap=r.mesh.position.distanceTo(r.target);
 
-    // STEP 6 fallback smoothing: predict a short distance ahead from the latest velocity.
-    // This cannot remove real internet latency, but it stops remote players from looking
-    // like they freeze for a packet and then jump to the next Firebase position.
-    const directFresh=r.fastPacketAt>0&&(now-r.fastPacketAt)<650;
-    const predictCap=directFresh?.14:.24;
-    const predictSeconds=Math.min(predictCap,.060+r.packetInterval*.72+Math.min(age,.10));
-    const predicted=r.target.clone();
-    if(age<.45)predicted.addScaledVector(r.velocity,predictSeconds);
-
-    const gap=r.mesh.position.distanceTo(predicted);
-    if(gap>13){
-      // Teleports/respawns should snap instead of sliding across the whole map.
-      r.mesh.position.copy(r.target);
+    // STEP 6 v4 STABLE: follow the latest Firebase position directly.
+    // No velocity prediction/extrapolation: that made high-ping players appear to
+    // move slowly, overshoot, and then correct. A stronger interpolation catches up
+    // quickly while remaining smooth at the stable 10 Hz network rate.
+    if(gap>14){
+      r.mesh.position.copy(r.target); // respawn / teleport
     }else{
-      const alpha=gap>5?.52:gap>2?.42:.34;
-      r.mesh.position.lerp(predicted,alpha);
+      const alpha=gap>6?.68:gap>2?.50:.34;
+      r.mesh.position.lerp(r.target,alpha);
     }
 
     let delta=r.targetRot-r.mesh.rotation.y;
     delta=Math.atan2(Math.sin(delta),Math.cos(delta));
-    r.mesh.rotation.y+=delta*(Math.abs(delta)>.6?.48:.36);
+    r.mesh.rotation.y+=delta*.42;
 
     const moved=before.distanceTo(r.mesh.position)>.012;
     if(r.mesh.rig){
@@ -926,9 +920,7 @@ function updateRemotePlayers(){
       if(r.swing){
         r.swingP+=.13;
         if(r.swingP>=1){
-          r.swing=false;
-          r.swingP=0;
-          r.mesh.rig.ra.rotation.set(0,0,0);
+          r.swing=false;r.swingP=0;r.mesh.rig.ra.rotation.set(0,0,0);
         }else{
           const a=Math.sin(r.swingP*Math.PI);
           r.mesh.rig.ra.rotation.x=-a*1.7;
@@ -941,22 +933,21 @@ function updateRemotePlayers(){
 
 function sendLocalPlayerState(force=false){
   if(!gameStarted||!lobbyState.code||!firebaseUser)return;
-  if(force)sendLocalFastState(true);
   const now=performance.now();
-  const fbInterval=openFastPeerCount()>0?180:50; // P2P open = light backup; fallback = ~20 Hz for smoother long-distance play
+  const fbInterval=100; // stable ~10 Hz; forced sends still happen instantly for combat/death/respawn
   if(!force&&now-lastNetworkSend<fbInterval)return;
 
   const pos=player.position;
   const motionFlag=(keys.KeyW||keys.KeyA||keys.KeyS||keys.KeyD||Math.abs(kbx)>.02||Math.abs(kbz)>.02||Math.abs(vy)>.02)?1:0;
   const signature=[Math.round(health),isDead?1:0,finalDead?1:0,selected,inv.armor,inv.sword,attackSeq,motionFlag].join('|');
-  const moved=!lastNetworkPosition||pos.distanceTo(lastNetworkPosition)>.025;
+  const moved=!lastNetworkPosition||pos.distanceTo(lastNetworkPosition)>.035;
   let rotated=true;
-  if(lastNetworkRotation!==null){let rd=player.rotation.y-lastNetworkRotation;rd=Math.atan2(Math.sin(rd),Math.cos(rd));rotated=Math.abs(rd)>.018;}
+  if(lastNetworkRotation!==null){let rd=player.rotation.y-lastNetworkRotation;rd=Math.atan2(Math.sin(rd),Math.cos(rd));rotated=Math.abs(rd)>.020;}
   const changed=signature!==lastNetworkSignature;
-  const heartbeat=now-lastNetworkHeartbeat>=(openFastPeerCount()>0?1200:320);
+  const heartbeat=now-lastNetworkHeartbeat>=750;
   if(!force&&!moved&&!rotated&&!changed&&!heartbeat)return;
 
-  const dt=Math.max(.016,Math.min(.7,(now-lastNetworkSend)/1000||.09));
+  const dt=Math.max(.016,Math.min(.7,(now-lastNetworkSend)/1000||.10));
   const vx=lastNetworkPosition?(pos.x-lastNetworkPosition.x)/dt:0;
   const vyNet=lastNetworkPosition?(pos.y-lastNetworkPosition.y)/dt:0;
   const vz=lastNetworkPosition?(pos.z-lastNetworkPosition.z)/dt:0;
@@ -1010,7 +1001,7 @@ function startCombatSync(){
   if(!lobbyState.code||!firebaseUser)return;
   stopCombatSync();combatListenStartedAt=Date.now();
 
-  // STEP 6 v3 PRIMARY FALLBACK: use the same shared /world branch already proven
+  // STEP 6 v4 RELIABLE FALLBACK: use the same shared /world branch already proven
   // to work for arrows, fireballs and TNT. Every client hears the event, but only
   // the named victim applies the damage. processedHitIds prevents P2P/Firebase doubles.
   sharedHitsRef=db.ref(`rooms/${lobbyState.code}/world/hits`);
@@ -1068,19 +1059,25 @@ function sendPlayerHit(target,rawDamage,source='sword',forcedHitId=null,opts={})
     verticalKb:Number.isFinite(Number(opts.verticalKb))?Number(opts.verticalKb):undefined,
     createdAt:Date.now()};
 
-  // Fastest path when WebRTC is available.
-  sendFastToPeer(target.uid,{t:'hit',e:hit},true);
+  // STEP 6 v4 RELIABLE MELEE: send the SAME hit id to two lightweight Firebase paths.
+  // The victim listens to both, and rememberHit(hitId) guarantees it can only apply once.
+  // This is intentionally independent of movement updates.
+  const room=db.ref(`rooms/${lobbyState.code}`);
+  const payload={...hit,serverAt:firebase.database.ServerValue.TIMESTAMP};
+  const updates={};
+  updates[`world/hits/${hitId}`]=payload;
+  updates[`combatInbox/${target.uid}/${hitId}`]=payload;
+  room.update(updates).catch(err=>console.error('Melee hit send error:',err));
 
-  // Guaranteed Firebase fallback: use /world/hits because this same branch is already
-  // working in your live tests for projectile synchronization.
-  const hitRef=db.ref(`rooms/${lobbyState.code}/world/hits/${hitId}`);
-  hitRef.set({...hit,serverAt:firebase.database.ServerValue.TIMESTAMP})
-    .then(()=>setTimeout(()=>hitRef.remove().catch(()=>{}),5000))
-    .catch(err=>console.error('Shared melee hit send error:',err));
-
-  // Attacker-side prediction makes combos feel immediate even before the victim's
-  // Firebase response comes back across countries.
+  // Attacker-side feedback is immediate; the victim applies the authoritative damage.
   predictRemoteKnockback(target,source);
+  pop(target.mesh.position,'⚔ HIT');
+
+  // Clean stale event copies. Usually the victim removes them sooner.
+  setTimeout(()=>{
+    room.child(`world/hits/${hitId}`).remove().catch(()=>{});
+    room.child(`combatInbox/${target.uid}/${hitId}`).remove().catch(()=>{});
+  },4500);
   return true;
 }
 
@@ -1126,6 +1123,16 @@ async function startGameFromFirebase(){
 
 let networkTimer=null;
 
+function stopLobbyRoomListenerForMatch(){
+  // The lobby uses a room-level `value` listener. Keeping it alive during gameplay
+  // makes EVERY movement/world write re-download and re-process the entire room.
+  if(roomListenerRef&&roomListenerHandler){
+    roomListenerRef.off('value',roomListenerHandler);
+    roomListenerRef=null;
+    roomListenerHandler=null;
+  }
+}
+
 function startGame(){
   if(gameStarted)return;
 
@@ -1136,6 +1143,7 @@ function startGame(){
   }
 
   gameStarted=true;
+  stopLobbyRoomListenerForMatch();
   lastHealthRegen=performance.now();
   lastAlarm=performance.now();
 
@@ -1173,19 +1181,15 @@ function startGame(){
   startSharedWorldSync();
   startProjectileSync();
 
-  // Direct peers get ~30 Hz no-wait movement/combat. Firebase stays as the durable fallback.
-  if(fastNetworkTimer)clearInterval(fastNetworkTimer);
-  fastNetworkTimer=setInterval(()=>sendLocalFastState(false),33);
-  if(rtcPingTimer)clearInterval(rtcPingTimer);
-  rtcPingTimer=setInterval(()=>{
-    const sent=performance.now(),id=++rtcPingSeq;
-    for(const uid of Object.keys(rtcPeers))sendFastToPeer(uid,{t:'ping',id,sent},true);
-  },1000);
+  // STEP 6 v4 STABLE: STUN-only P2P failed on the tested networks, so do not keep
+  // retrying it during the match. A light 10 Hz Firebase movement stream plus forced
+  // combat/death sends is more stable and leaves bandwidth for world/combat events.
+  stopRtcFastLane();
   if(networkTimer)clearInterval(networkTimer);
-  networkTimer=setInterval(()=>sendLocalPlayerState(false),50);
+  networkTimer=setInterval(()=>sendLocalPlayerState(false),100);
 
-  updateNetworkBadge();
-  sendLocalFastState(true);
+  const nb=document.getElementById('netBadge');
+  if(nb)nb.textContent='FIREBASE STABLE • '+team.toUpperCase()+' • 10HZ';
   sendLocalPlayerState(true);
   ui();
   toast(TEAM[team].name+' Team — live multiplayer connected!');
@@ -1717,44 +1721,34 @@ function hitBot(b,dmg,from){b.hp-=Math.round(dmg*armorMult(b.armor));pop(b.mesh.
 function attack(){
   if(isDead||selected>2)return;
   const now=performance.now();
-  const attackCooldown=selected===2?190:145;
+  const attackCooldown=selected===2?220:170;
   if(now-lastMeleeAttackAt<attackCooldown)return;
   lastMeleeAttackAt=now;
-  swing=true;
-  swingP=0;
-  attackSeq++;
-  sendLocalFastState(true);
-  sendLocalPlayerState(true); // makes the remote swing appear immediately
+  swing=true;swingP=0;attackSeq++;
+  sendLocalPlayerState(true);
 
   const dmg=selected===2?8:swordDamage(inv.sword);
 
-  // Latency-compensated multiplayer melee. Firebase fallback displays a slightly
-  // delayed opponent position, so give fallback a larger horizontal hitbox while
-  // still requiring the players to be at roughly the same vertical level.
-  const meleeRange=openFastPeerCount()>0?6.4:8.2;
-  let target=null,dist=meleeRange;
+  // Cross-country melee: compare against both the displayed interpolated position and
+  // the newest Firebase target position. This prevents visual latency from making a
+  // player look in range while the hit test uses an older/farther point.
+  const meleeRange=7.4;
+  let target=null,best=meleeRange;
   for(const r of Object.values(remotePlayers)){
     if(r.dead||r.finalDead||r.team===myTeam()||!r.mesh.visible)continue;
-    const dx=player.position.x-r.mesh.position.x;
-    const dz=player.position.z-r.mesh.position.z;
-    const horizontal=Math.hypot(dx,dz);
-    const vertical=Math.abs(player.position.y-r.mesh.position.y);
-    if(vertical<=6.5&&horizontal<dist){dist=horizontal;target=r}
+    const positions=[r.mesh.position,r.target];
+    for(const rp of positions){
+      const horizontal=Math.hypot(player.position.x-rp.x,player.position.z-rp.z);
+      const vertical=Math.abs(player.position.y-rp.y);
+      if(vertical<=7&&horizontal<best){best=horizontal;target=r;}
+    }
   }
   if(target){
-    sendPlayerHit(target,dmg,selected===2?'pickaxe':'sword',null,{});
+    sendPlayerHit(target,dmg,selected===2?'pickaxe':'sword');
     return;
   }
 
-  // Keep the old bot hook harmless for compatibility (bots are disabled).
-  for(const b of bots){
-    if(b.dead||b.final)continue;
-    const d=player.position.distanceTo(b.mesh.position);
-    if(d<dist){dist=d;target=b}
-  }
-  if(target&&target.mesh&&target.hp!==undefined){hitBot(target,dmg,player.position);return}
-
-  // Shared bed damage remains a Firebase transaction so every device sees one result.
+  // Shared bed damage.
   for(const t of enemies(myTeam())){
     const bd=beds[t];
     if(bd.alive&&player.position.distanceTo(bd.mesh.position)<6){
