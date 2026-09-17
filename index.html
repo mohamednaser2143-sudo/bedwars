@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Fight On A Baseplate — Multiplayer BedWars STEP 4</title>
+<title>Fight On A Baseplate — Multiplayer BedWars STEP 6</title>
 <style>
 *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#87ceeb;font-family:Segoe UI,Arial,sans-serif;user-select:none}canvas{display:block}
 #menu,.modal,.screen{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;z-index:100;color:#fff;background:rgba(7,12,20,.88);backdrop-filter:blur(8px)}.panel{width:min(720px,92vw);padding:30px;border-radius:18px;background:rgba(20,28,40,.96);border:1px solid #42536b;box-shadow:0 25px 80px #000;text-align:center}.panel h1{font-size:44px;margin:0 0 6px;text-shadow:0 0 18px #00c6ff}.panel p{color:#b9c2cc}.btn{border:0;border-radius:8px;padding:13px 22px;margin:5px;background:linear-gradient(135deg,#0072ff,#00c6ff);color:#fff;font-weight:900;font-size:16px;cursor:pointer}.btn:hover{filter:brightness(1.15);transform:translateY(-1px)}
@@ -168,7 +168,7 @@
       </div>
     </div>
 
-    <div class="lobbyFinePrint">Firebase live multiplayer STEP 4: party + team assignment + real-player movement + PvP combat. Sword/pickaxe hits now travel through Firebase combat events; the victim applies damage/knockback locally and republishes HP/death state for all players.</div>
+    <div class="lobbyFinePrint">STEP 6 v2 multiplayer: Firebase keeps durable match/world state while a no-wait WebRTC fast lane carries movement, combo hits and projectile events directly between players when available. The HUD shows P2P FAST plus measured round-trip latency when direct mode is active; Firebase remains the automatic fallback.</div>
   </div>
 </div>
 <div id="netBadge">FIREBASE LIVE</div><div id="hud"><div class="teamTitle" id="teamTitle">BLUE TEAM</div><div>HP: <span id="hp">100</span>/100</div><div class="bar"><div id="hpbar"></div></div><div class="res iron">Iron: <span id="iron">0</span></div><div class="res gold">Gold: <span id="gold">0</span></div><div class="res dia">Diamonds: <span id="diamonds">0</span></div><div class="res emer">Emeralds: <span id="emeralds">0</span></div><div>Armor: <span id="armor">Leather</span></div><div>Bed: <span id="bed">ALIVE</span></div><div class="help">🛒 PURPLE NPC = ITEM SHOP • click him</div><div class="help">⚙ GREEN NPC = TEAM UPGRADES • click him</div><div class="help">🛏️ Protect your team bed and eliminate opposing players.</div></div>
@@ -498,11 +498,15 @@ async function startPartyMatch(){
     const count=snap.exists()?snap.numChildren():0;
     if(count<2){toast('At least 2 players are required');return}
 
-    // STEP 5: the host creates one authoritative shared bed state before anyone spawns.
+    // STEP 6: the host creates one authoritative shared match/world state before anyone spawns.
     const bedDefaults={};
     for(const t of teamKeys)bedDefaults[t]={hp:100,alive:true,updatedAt:firebase.database.ServerValue.TIMESTAMP};
     await roomBase.child('beds').set(bedDefaults);
     await roomBase.child('world/blocks').remove(); // fresh build layer for this match
+    await roomBase.child('world/projectiles').remove();
+    await roomBase.child('world/explosions').remove();
+    await roomBase.child('combatInbox').remove();
+    await roomBase.child('rtc').remove();
     await roomBase.child('status').set('playing');
   }catch(err){
     console.error(err);
@@ -511,7 +515,7 @@ async function startPartyMatch(){
 }
 
 
-// ===== LIVE MULTIPLAYER PLAYERS + PVP COMBAT + LAG SMOOTHING (STEP 5) =====
+// ===== LIVE MULTIPLAYER PLAYERS + PVP + WEBRTC FAST LANE (STEP 6) =====
 const remotePlayers = {};
 let matchPlayersRef = null;
 let matchPlayersHandler = null;
@@ -526,6 +530,197 @@ let combatChildAdded = null;
 let matchEventsRef = null;
 let matchEventChildAdded = null;
 let combatListenStartedAt = 0;
+
+
+// STEP 6 LOW-LATENCY FAST LANE
+// Firebase remains the durable/shared source of truth. WebRTC DataChannels are a
+// best-effort direct browser-to-browser lane for movement, combos and projectile
+// events. If a peer-to-peer connection cannot be established, Firebase continues
+// to work as the automatic fallback.
+const rtcPeers={};
+const RTC_CONFIG={iceServers:[
+  {urls:'stun:stun.l.google.com:19302'},
+  {urls:'stun:stun1.l.google.com:19302'}
+]};
+let fastNetworkTimer=null;
+let rtcPingTimer=null;
+let rtcPingSeq=0;
+let lastFastSend=0,lastFastHeartbeat=0,lastFastPosition=null,lastFastRotation=null,lastFastSignature='';
+
+function rtcPairKey(a,b){return [a,b].sort().join('__')}
+function openFastPeerCount(){return Object.values(rtcPeers).filter(x=>x.dc?.readyState==='open').length}
+function updateNetworkBadge(){
+  const el=document.getElementById('netBadge');
+  if(!el||!gameStarted)return;
+  const open=Object.values(rtcPeers).filter(x=>x.dc?.readyState==='open');
+  if(open.length){
+    const samples=open.map(x=>Number(x.rtt)).filter(Number.isFinite);
+    const rtt=samples.length?Math.round(samples.reduce((a,b)=>a+b,0)/samples.length):null;
+    el.textContent=`P2P FAST • ${myTeam().toUpperCase()} • ${open.length} DIRECT${rtt!==null?' • '+rtt+'ms':''}`;
+  }else{
+    el.textContent=`FIREBASE LIVE • ${myTeam().toUpperCase()} • FALLBACK`;
+  }
+}
+function sendFastToPeer(uid,msg,critical=false){
+  const r=rtcPeers[uid];
+  if(!r?.dc||r.dc.readyState!=='open')return false;
+  try{
+    // Drop stale movement under congestion instead of queuing it behind newer movement.
+    // Critical hit/projectile packets get a larger allowance and Firebase still backs them up.
+    const limit=critical?1048576:65536;
+    if(r.dc.bufferedAmount>limit)return false;
+    r.dc.send(JSON.stringify(msg));
+    return true;
+  }catch(err){console.warn('Fast lane send failed',err);return false}
+}
+function broadcastFast(msg,critical=false){let n=0;for(const uid of Object.keys(rtcPeers))if(sendFastToPeer(uid,msg,critical))n++;return n}
+
+function handleFastMessage(uid,msg){
+  if(!msg||typeof msg!=='object')return;
+  if(msg.t==='s'){
+    updateRemoteRecord(uid,msg.d||{},'p2p');
+  }else if(msg.t==='hit'){
+    applyIncomingPlayerHit(msg.e||{});
+  }else if(msg.t==='projectile'){
+    receiveSharedProjectile(msg.id,msg.d||{},'p2p');
+  }else if(msg.t==='projectileRemove'){
+    removeSharedProjectileLocal(msg.id);
+  }else if(msg.t==='explosion'){
+    handleExplosionEvent(msg.e||{},'p2p');
+  }else if(msg.t==='ping'){
+    sendFastToPeer(uid,{t:'pong',id:msg.id,sent:msg.sent},true);
+  }else if(msg.t==='pong'){
+    const r=rtcPeers[uid];
+    if(r&&Number.isFinite(Number(msg.sent))){
+      r.rtt=Math.max(0,performance.now()-Number(msg.sent));
+      updateNetworkBadge();
+    }
+  }
+}
+
+function setupRtcDataChannel(uid,dc){
+  const r=rtcPeers[uid];if(!r)return;
+  r.dc=dc;
+  dc.binaryType='arraybuffer';
+  dc.onopen=()=>{r.openedAt=performance.now();updateNetworkBadge();sendLocalFastState(true)};
+  dc.onclose=()=>updateNetworkBadge();
+  dc.onerror=()=>updateNetworkBadge();
+  dc.onmessage=e=>{
+    try{handleFastMessage(uid,JSON.parse(e.data))}catch(err){console.warn('Bad fast-lane packet',err)}
+  };
+}
+
+async function flushRtcCandidates(r){
+  if(!r?.pc?.remoteDescription)return;
+  const q=r.pendingCandidates.splice(0);
+  for(const c of q){try{await r.pc.addIceCandidate(new RTCIceCandidate(c))}catch(err){console.warn('ICE candidate error',err)}}
+}
+
+async function ensureRtcPeer(uid){
+  if(!uid||uid===playerSessionId||!lobbyState.code||typeof RTCPeerConnection==='undefined')return;
+  if(rtcPeers[uid])return rtcPeers[uid];
+  const initiator=playerSessionId<uid;
+  const pairKey=rtcPairKey(playerSessionId,uid);
+  const signalRef=db.ref(`rooms/${lobbyState.code}/rtc/${pairKey}`);
+  const pc=new RTCPeerConnection(RTC_CONFIG);
+  const r=rtcPeers[uid]={uid,pc,dc:null,signalRef,initiator,pendingCandidates:[],offerHandled:false,answerHandled:false,rtt:null};
+
+  pc.onconnectionstatechange=()=>{
+    updateNetworkBadge();
+    if(pc.connectionState==='failed'){
+      try{pc.restartIce?.()}catch{}
+    }
+  };
+  pc.onicecandidate=e=>{
+    if(!e.candidate)return;
+    signalRef.child(`candidates/${playerSessionId}`).push(e.candidate.toJSON())
+      .catch(err=>console.warn('ICE publish error',err));
+  };
+
+  r.remoteCandidatesRef=signalRef.child(`candidates/${uid}`);
+  r.remoteCandidateHandler=r.remoteCandidatesRef.on('child_added',snap=>{
+    const c=snap.val();if(!c)return;
+    if(pc.remoteDescription)pc.addIceCandidate(new RTCIceCandidate(c)).catch(err=>console.warn('ICE add error',err));
+    else r.pendingCandidates.push(c);
+  });
+
+  if(initiator){
+    setupRtcDataChannel(uid,pc.createDataChannel('bedwars-fast',{ordered:false,maxRetransmits:0}));
+    r.answerRef=signalRef.child('answer');
+    r.answerHandler=r.answerRef.on('value',async snap=>{
+      const a=snap.val();
+      if(!a?.sdp||r.answerHandled||pc.signalingState==='closed')return;
+      try{
+        r.answerHandled=true;
+        await pc.setRemoteDescription(new RTCSessionDescription(a));
+        await flushRtcCandidates(r);
+      }catch(err){r.answerHandled=false;console.warn('RTC answer error',err)}
+    });
+    try{
+      const offer=await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await signalRef.child('offer').set({type:offer.type,sdp:offer.sdp,from:playerSessionId,createdAt:firebase.database.ServerValue.TIMESTAMP});
+    }catch(err){console.warn('RTC offer error',err)}
+  }else{
+    pc.ondatachannel=e=>setupRtcDataChannel(uid,e.channel);
+    r.offerRef=signalRef.child('offer');
+    r.offerHandler=r.offerRef.on('value',async snap=>{
+      const o=snap.val();
+      if(!o?.sdp||r.offerHandled||pc.signalingState==='closed')return;
+      try{
+        r.offerHandled=true;
+        await pc.setRemoteDescription(new RTCSessionDescription(o));
+        await flushRtcCandidates(r);
+        const ans=await pc.createAnswer();
+        await pc.setLocalDescription(ans);
+        await signalRef.child('answer').set({type:ans.type,sdp:ans.sdp,from:playerSessionId,createdAt:firebase.database.ServerValue.TIMESTAMP});
+      }catch(err){r.offerHandled=false;console.warn('RTC offer handling error',err)}
+    });
+  }
+  return r;
+}
+
+function cleanupRtcPeer(uid){
+  const r=rtcPeers[uid];if(!r)return;
+  try{if(r.remoteCandidatesRef)r.remoteCandidatesRef.off('child_added',r.remoteCandidateHandler)}catch{}
+  try{if(r.answerRef)r.answerRef.off('value',r.answerHandler)}catch{}
+  try{if(r.offerRef)r.offerRef.off('value',r.offerHandler)}catch{}
+  try{r.dc?.close()}catch{}
+  try{r.pc?.close()}catch{}
+  delete rtcPeers[uid];
+  updateNetworkBadge();
+}
+function stopRtcFastLane(){
+  if(fastNetworkTimer){clearInterval(fastNetworkTimer);fastNetworkTimer=null}
+  if(rtcPingTimer){clearInterval(rtcPingTimer);rtcPingTimer=null}
+  for(const uid of Object.keys(rtcPeers))cleanupRtcPeer(uid);
+}
+
+function sendLocalFastState(force=false){
+  if(!gameStarted||!lobbyState.code||openFastPeerCount()===0)return;
+  const now=performance.now();
+  if(!force&&now-lastFastSend<30)return;
+  const pos=player.position;
+  const motionFlag=(keys.KeyW||keys.KeyA||keys.KeyS||keys.KeyD||Math.abs(kbx)>.02||Math.abs(kbz)>.02||Math.abs(vy)>.02)?1:0;
+  const signature=[Math.round(health),isDead?1:0,finalDead?1:0,selected,inv.armor,inv.sword,attackSeq,motionFlag].join('|');
+  const moved=!lastFastPosition||pos.distanceTo(lastFastPosition)>.007;
+  let rotated=true;
+  if(lastFastRotation!==null){let rd=player.rotation.y-lastFastRotation;rd=Math.atan2(Math.sin(rd),Math.cos(rd));rotated=Math.abs(rd)>.004}
+  const changed=signature!==lastFastSignature;
+  const heartbeat=now-lastFastHeartbeat>=250;
+  if(!force&&!moved&&!rotated&&!changed&&!heartbeat)return;
+  const dt=Math.max(.016,Math.min(.25,(now-lastFastSend)/1000||.033));
+  const vx=lastFastPosition?(pos.x-lastFastPosition.x)/dt:0;
+  const vyNet=lastFastPosition?(pos.y-lastFastPosition.y)/dt:0;
+  const vz=lastFastPosition?(pos.z-lastFastPosition.z)/dt:0;
+  lastFastSend=now;lastFastHeartbeat=now;lastFastPosition=pos.clone();lastFastRotation=player.rotation.y;lastFastSignature=signature;
+  broadcastFast({t:'s',d:{
+    playerId:playerSessionId,name:lobbyState.name||'Player',team:myTeam(),
+    x:+pos.x.toFixed(3),y:+pos.y.toFixed(3),z:+pos.z.toFixed(3),rot:+player.rotation.y.toFixed(4),
+    vx:+vx.toFixed(3),vy:+vyNet.toFixed(3),vz:+vz.toFixed(3),hp:Math.max(0,Math.round(health)),
+    dead:!!isDead,finalDead:!!finalDead,selected,armor:inv.armor,sword:inv.sword,attackSeq
+  }});
+}
 
 function myTeam(){
   return lobbyState.team || 'blue';
@@ -549,6 +744,7 @@ function removeRemotePlayer(uid){
   if(!r)return;
   scene.remove(r.mesh);
   delete remotePlayers[uid];
+  cleanupRtcPeer(uid);
 }
 
 function makeRemotePlayer(uid,data){
@@ -590,57 +786,64 @@ function makeRemotePlayer(uid,data){
     lastAttackSeq:Number(data.attackSeq)||0,
     velocity:new THREE.Vector3(Number(data.vx)||0,Number(data.vy)||0,Number(data.vz)||0),
     packetAt:performance.now(),
+    fastPacketAt:0,
     packetInterval:.10,
     swing:false,
     swingP:0
   };
+  setTimeout(()=>ensureRtcPeer(uid),0);
   return remotePlayers[uid];
 }
 
-function updateRemoteRecord(uid,data){
+function updateRemoteRecord(uid,data,source='firebase'){
   if(!data||!data.team)return;
   let r=remotePlayers[uid];
   if(!r || r.team!==data.team || r.name!==(data.name||'Player')){
     if(r)removeRemotePlayer(uid);
     r=makeRemotePlayer(uid,data);
   }
-  r.target.set(
-    Number.isFinite(Number(data.x))?Number(data.x):r.target.x,
-    Number.isFinite(Number(data.y))?Number(data.y):r.target.y,
-    Number.isFinite(Number(data.z))?Number(data.z):r.target.z
-  );
-  r.targetRot=Number.isFinite(Number(data.rot))?Number(data.rot):r.targetRot;
+
   const packetNow=performance.now();
-  const packetGap=Math.max(.02,Math.min(.50,(packetNow-r.packetAt)/1000));
-  r.packetInterval=r.packetInterval*.72+packetGap*.28;
-  r.packetAt=packetNow;
-  r.velocity.set(Number(data.vx)||0,Number(data.vy)||0,Number(data.vz)||0);
-
-  const nextHp=Number.isFinite(Number(data.hp))?Number(data.hp):r.hp;
-  if(nextHp<r.hp && r.mesh.visible){
-    pop(r.mesh.position,'-'+Math.max(1,Math.round(r.hp-nextHp)));
-  }
-  r.hp=nextHp;
-  r.dead=!!data.dead;
-  r.finalDead=!!data.finalDead;
-  r.armor=Number(data.armor)||0;
-  r.sword=Number(data.sword)||0;
-  r.mesh.visible=!r.dead&&!r.finalDead;
-
-  const nextAttackSeq=Number(data.attackSeq)||0;
-  if(nextAttackSeq!==r.lastAttackSeq){
-    r.lastAttackSeq=nextAttackSeq;
-    r.swing=true;
-    r.swingP=0;
+  const fastFresh=r.fastPacketAt>0&&(packetNow-r.fastPacketAt)<650;
+  const useMotion=source==='p2p'||!fastFresh;
+  if(useMotion){
+    r.target.set(
+      Number.isFinite(Number(data.x))?Number(data.x):r.target.x,
+      Number.isFinite(Number(data.y))?Number(data.y):r.target.y,
+      Number.isFinite(Number(data.z))?Number(data.z):r.target.z
+    );
+    r.targetRot=Number.isFinite(Number(data.rot))?Number(data.rot):r.targetRot;
+    const packetGap=Math.max(.015,Math.min(.50,(packetNow-r.packetAt)/1000));
+    r.packetInterval=r.packetInterval*.68+packetGap*.32;
+    r.packetAt=packetNow;
+    if(source==='p2p')r.fastPacketAt=packetNow;
+    r.velocity.set(Number(data.vx)||0,Number(data.vy)||0,Number(data.vz)||0);
   }
 
-  if(r.mesh.rig){
-    r.mesh.rig.sword.visible=(Number(data.selected)||1)===1;
-    r.mesh.rig.pick.visible=(Number(data.selected)||1)===2;
-    const armor=r.armor;
-    r.mesh.rig.armorGroup.visible=armor>0;
-    const armorColor=[0xb56536,0x9aa5ad,0x55d8ff][armor]||0xb56536;
-    r.mesh.rig.armorGroup.children.forEach(c=>{if(c.material)c.material.color.setHex(armorColor)});
+  // A late Firebase packet must never roll back a newer direct P2P hit/state.
+  // If direct packets stop for ~650 ms, Firebase automatically becomes authoritative again.
+  const useState=source==='p2p'||!fastFresh;
+  if(useState){
+    const nextHp=Number.isFinite(Number(data.hp))?Number(data.hp):r.hp;
+    if(nextHp<r.hp && r.mesh.visible)pop(r.mesh.position,'-'+Math.max(1,Math.round(r.hp-nextHp)));
+    r.hp=nextHp;
+    r.dead=!!data.dead;
+    r.finalDead=!!data.finalDead;
+    r.armor=Number(data.armor)||0;
+    r.sword=Number(data.sword)||0;
+    r.mesh.visible=!r.dead&&!r.finalDead;
+
+    const nextAttackSeq=Number(data.attackSeq)||0;
+    if(nextAttackSeq!==r.lastAttackSeq){r.lastAttackSeq=nextAttackSeq;r.swing=true;r.swingP=0;}
+
+    if(r.mesh.rig){
+      r.mesh.rig.sword.visible=(Number(data.selected)||1)===1;
+      r.mesh.rig.pick.visible=(Number(data.selected)||1)===2;
+      const armor=r.armor;
+      r.mesh.rig.armorGroup.visible=armor>0;
+      const armorColor=[0xb56536,0x9aa5ad,0x55d8ff][armor]||0xb56536;
+      r.mesh.rig.armorGroup.children.forEach(c=>{if(c.material)c.material.color.setHex(armorColor)});
+    }
   }
 }
 
@@ -679,7 +882,7 @@ function updateRemotePlayers(){
     const before=r.mesh.position.clone();
     const age=Math.max(0,(now-r.packetAt)/1000);
 
-    // STEP 5 lag smoothing: predict a short distance ahead from the latest velocity.
+    // STEP 6 fallback smoothing: predict a short distance ahead from the latest velocity.
     // This cannot remove real internet latency, but it stops remote players from looking
     // like they freeze for a packet and then jump to the next Firebase position.
     const predictSeconds=Math.min(.16,.055+r.packetInterval*.55+Math.min(age,.06));
@@ -733,169 +936,121 @@ function updateRemotePlayers(){
 
 function sendLocalPlayerState(force=false){
   if(!gameStarted||!lobbyState.code||!firebaseUser)return;
+  if(force)sendLocalFastState(true);
   const now=performance.now();
-  if(!force&&now-lastNetworkSend<50)return; // up to 20 movement updates/second
+  const fbInterval=openFastPeerCount()>0?180:70; // P2P open = light backup; no P2P = faster Firebase fallback
+  if(!force&&now-lastNetworkSend<fbInterval)return;
 
   const pos=player.position;
   const motionFlag=(keys.KeyW||keys.KeyA||keys.KeyS||keys.KeyD||Math.abs(kbx)>.02||Math.abs(kbz)>.02||Math.abs(vy)>.02)?1:0;
   const signature=[Math.round(health),isDead?1:0,finalDead?1:0,selected,inv.armor,inv.sword,attackSeq,motionFlag].join('|');
-  const moved=!lastNetworkPosition||pos.distanceTo(lastNetworkPosition)>.018;
+  const moved=!lastNetworkPosition||pos.distanceTo(lastNetworkPosition)>.025;
   let rotated=true;
-  if(lastNetworkRotation!==null){
-    let rd=player.rotation.y-lastNetworkRotation;
-    rd=Math.atan2(Math.sin(rd),Math.cos(rd));
-    rotated=Math.abs(rd)>.012;
-  }
+  if(lastNetworkRotation!==null){let rd=player.rotation.y-lastNetworkRotation;rd=Math.atan2(Math.sin(rd),Math.cos(rd));rotated=Math.abs(rd)>.018;}
   const changed=signature!==lastNetworkSignature;
-  const heartbeat=now-lastNetworkHeartbeat>=650;
+  const heartbeat=now-lastNetworkHeartbeat>=(openFastPeerCount()>0?1200:450);
   if(!force&&!moved&&!rotated&&!changed&&!heartbeat)return;
 
-  const dt=Math.max(.016,Math.min(.65,(now-lastNetworkSend)/1000||.05));
+  const dt=Math.max(.016,Math.min(.7,(now-lastNetworkSend)/1000||.09));
   const vx=lastNetworkPosition?(pos.x-lastNetworkPosition.x)/dt:0;
   const vyNet=lastNetworkPosition?(pos.y-lastNetworkPosition.y)/dt:0;
   const vz=lastNetworkPosition?(pos.z-lastNetworkPosition.z)/dt:0;
+  lastNetworkSend=now;lastNetworkHeartbeat=now;lastNetworkPosition=pos.clone();lastNetworkRotation=player.rotation.y;lastNetworkSignature=signature;
 
-  lastNetworkSend=now;
-  lastNetworkHeartbeat=now;
-  lastNetworkPosition=pos.clone();
-  lastNetworkRotation=player.rotation.y;
-  lastNetworkSignature=signature;
-
-  const state={
-    playerId:playerSessionId,
-    authUid:firebaseUser.uid,
-    x:Number(pos.x.toFixed(3)),
-    y:Number(pos.y.toFixed(3)),
-    z:Number(pos.z.toFixed(3)),
-    rot:Number(player.rotation.y.toFixed(4)),
-    vx:Number(vx.toFixed(3)),
-    vy:Number(vyNet.toFixed(3)),
-    vz:Number(vz.toFixed(3)),
-    hp:Math.max(0,Math.round(health)),
-    dead:!!isDead,
-    finalDead:!!finalDead,
-    selected,
-    armor:inv.armor,
-    sword:inv.sword,
-    attackSeq,
-    online:true,
-    lastSeen:firebase.database.ServerValue.TIMESTAMP
-  };
-
-  db.ref(`rooms/${lobbyState.code}/players/${playerSessionId}`)
-    .update(state)
-    .catch(err=>console.error('Player sync error:',err));
+  const state={playerId:playerSessionId,authUid:firebaseUser.uid,name:lobbyState.name||'Player',team:myTeam(),
+    x:+pos.x.toFixed(3),y:+pos.y.toFixed(3),z:+pos.z.toFixed(3),rot:+player.rotation.y.toFixed(4),
+    vx:+vx.toFixed(3),vy:+vyNet.toFixed(3),vz:+vz.toFixed(3),hp:Math.max(0,Math.round(health)),dead:!!isDead,
+    finalDead:!!finalDead,selected,armor:inv.armor,sword:inv.sword,attackSeq,online:true,lastSeen:firebase.database.ServerValue.TIMESTAMP};
+  db.ref(`rooms/${lobbyState.code}/players/${playerSessionId}`).update(state).catch(err=>console.error('Player sync error:',err));
 }
 
-// ===== STEP 4 FIREBASE PVP EVENTS (kept for STEP 5) =====
+// ===== STEP 6 LOW-LATENCY PVP EVENTS =====
+const processedHitIds=new Set();
+function rememberHit(id){if(!id||processedHitIds.has(id))return false;processedHitIds.add(id);setTimeout(()=>processedHitIds.delete(id),12000);return true}
+function newNetId(prefix='e'){return (prefix+'_'+playerSessionId+'_'+Date.now()+'_'+Math.random().toString(36).slice(2,8)).replace(/[^a-zA-Z0-9_-]/g,'')}
+
 function stopCombatSync(){
-  if(combatEventsRef){
-    combatEventsRef.off('child_added');
-    combatEventsRef=null;
-  }
-  if(matchEventsRef){
-    matchEventsRef.off('child_added');
-    matchEventsRef=null;
-  }
-  combatChildAdded=null;
-  matchEventChildAdded=null;
+  if(combatEventsRef){combatEventsRef.off('child_added',combatChildAdded);combatEventsRef=null;}
+  if(matchEventsRef){matchEventsRef.off('child_added',matchEventChildAdded);matchEventsRef=null;}
+  combatChildAdded=null;matchEventChildAdded=null;
 }
-
 function publishMatchEvent(text,type='info'){
   if(!lobbyState.code||!firebaseUser)return;
-  db.ref(`rooms/${lobbyState.code}/matchEvents`).push({
-    text,
-    type,
-    createdAt:firebase.database.ServerValue.TIMESTAMP
-  }).catch(err=>console.error('Match event error:',err));
+  db.ref(`rooms/${lobbyState.code}/matchEvents`).push({text,type,createdAt:firebase.database.ServerValue.TIMESTAMP})
+    .catch(err=>console.error('Match event error:',err));
 }
-
 function applyIncomingPlayerHit(evt){
   if(!evt||evt.victimId!==playerSessionId)return;
   if(isDead||finalDead||matchOver)return;
-  if(evt.attackerTeam===myTeam())return; // never accept friendly fire
+  const id=evt.hitId||evt.id||'';
+  if(id&&!rememberHit(id))return;
+  // teammates cannot hurt each other; self-explosions are allowed for fireball/TNT jumps.
+  if(evt.attackerTeam===myTeam()&&evt.attackerId!==playerSessionId)return;
 
   const raw=Math.max(1,Number(evt.rawDamage)||1);
   const dmg=Math.max(1,Math.round(raw*armorMult(inv.armor)));
-  health=Math.max(0,health-dmg);
-  lastHealthRegen=performance.now();
-  pop(player.position,'-'+dmg);
-
-  // Knockback is applied by the victim's browser so movement sync stays authoritative.
+  health=Math.max(0,health-dmg);lastHealthRegen=performance.now();pop(player.position,'-'+dmg);
   const from=new THREE.Vector3(Number(evt.fromX)||0,Number(evt.fromY)||0,Number(evt.fromZ)||0);
   const d=player.position.clone().sub(from).setY(0);
   if(d.lengthSq()>0.0001){
     d.normalize();
-    const kb=evt.source==='pickaxe'?.62:.82;
-    kbx=d.x*kb;
-    kbz=d.z*kb;
-    vy=.23;
-    grounded=false;
+    const kb=Number.isFinite(Number(evt.kbStrength))?Number(evt.kbStrength):(evt.source==='pickaxe'?.60:evt.source==='arrow'?.46:.80);
+    kbx=d.x*kb;kbz=d.z*kb;vy=Number.isFinite(Number(evt.verticalKb))?Number(evt.verticalKb):.23;grounded=false;
   }
-
-  ui();
-  sendLocalPlayerState(true);
-  if(health<=0){
-    playerDeath(evt.attackerName||TEAM[evt.attackerTeam]?.name||'Enemy');
-  }
+  ui();sendLocalPlayerState(true);
+  if(health<=0)playerDeath(evt.attackerName||TEAM[evt.attackerTeam]?.name||'Enemy');
 }
-
 function startCombatSync(){
   if(!lobbyState.code||!firebaseUser)return;
-  stopCombatSync();
-  combatListenStartedAt=Date.now();
-
-  combatEventsRef=db.ref(`rooms/${lobbyState.code}/combatEvents`);
+  stopCombatSync();combatListenStartedAt=Date.now();
+  // Listen only to THIS player's inbox. This is lighter/faster than every client
+  // listening to one giant global combat event list.
+  combatEventsRef=db.ref(`rooms/${lobbyState.code}/combatInbox/${playerSessionId}`);
   combatChildAdded=combatEventsRef.on('child_added',snap=>{
     const evt=snap.val()||{};
-    if(evt.victimId!==playerSessionId)return;
-
-    // Ignore stale hits left from an interrupted browser session.
     const created=Number(evt.createdAt)||0;
-    if(created && created<combatListenStartedAt-2500){
-      snap.ref.remove().catch(()=>{});
-      return;
-    }
-
+    if(created&&created<combatListenStartedAt-4000){snap.ref.remove().catch(()=>{});return;}
     applyIncomingPlayerHit(evt);
     snap.ref.remove().catch(err=>console.error('Combat cleanup error:',err));
   });
-
   matchEventsRef=db.ref(`rooms/${lobbyState.code}/matchEvents`);
   matchEventChildAdded=matchEventsRef.on('child_added',snap=>{
-    const evt=snap.val()||{};
-    const created=Number(evt.createdAt)||0;
-    if(created && created<combatListenStartedAt-2500)return;
+    const evt=snap.val()||{};const created=Number(evt.createdAt)||0;
+    if(created&&created<combatListenStartedAt-4000)return;
     if(evt.text)kill(evt.text);
   });
 }
-
-function sendPlayerHit(target,rawDamage,source='sword'){
+function predictRemoteKnockback(target,source='sword'){
+  if(!target?.mesh)return;
+  const d=target.mesh.position.clone().sub(player.position).setY(0);
+  if(d.lengthSq()<.001)return;
+  d.normalize();
+  const push=source==='pickaxe'?.35:source==='arrow'?.22:.52;
+  target.mesh.position.addScaledVector(d,push);
+  target.target.addScaledVector(d,push*.65);
+}
+function sendPlayerHit(target,rawDamage,source='sword',forcedHitId=null,opts={}){
   if(!target||target.dead||target.finalDead||target.team===myTeam())return false;
   if(!lobbyState.code||!firebaseUser)return false;
+  const hitId=forcedHitId||newNetId('hit');
+  const hit={hitId,attackerId:playerSessionId,attackerName:lobbyState.name||'Player',attackerTeam:myTeam(),
+    victimId:target.uid,victimName:target.name||'Player',victimTeam:target.team,rawDamage:Math.max(1,Math.round(rawDamage)),source,
+    fromX:+player.position.x.toFixed(3),fromY:+player.position.y.toFixed(3),fromZ:+player.position.z.toFixed(3),
+    kbStrength:Number.isFinite(Number(opts.kbStrength))?Number(opts.kbStrength):undefined,
+    verticalKb:Number.isFinite(Number(opts.verticalKb))?Number(opts.verticalKb):undefined,
+    createdAt:Date.now()};
 
-  const hit={
-    attackerId:playerSessionId,
-    attackerName:lobbyState.name||'Player',
-    attackerTeam:myTeam(),
-    victimId:target.uid,
-    victimName:target.name||'Player',
-    victimTeam:target.team,
-    rawDamage:Math.max(1,Math.round(rawDamage)),
-    source,
-    fromX:Number(player.position.x.toFixed(3)),
-    fromY:Number(player.position.y.toFixed(3)),
-    fromZ:Number(player.position.z.toFixed(3)),
-    createdAt:firebase.database.ServerValue.TIMESTAMP
-  };
-
-  db.ref(`rooms/${lobbyState.code}/combatEvents`).push(hit)
+  // Direct first: usually arrives much sooner for players in different countries.
+  sendFastToPeer(target.uid,{t:'hit',e:hit},true);
+  // Firebase backup guarantees the hit still arrives if WebRTC is blocked by NAT/firewall.
+  db.ref(`rooms/${lobbyState.code}/combatInbox/${target.uid}/${hitId}`).set({...hit,serverAt:firebase.database.ServerValue.TIMESTAMP})
     .catch(err=>console.error('Combat hit send error:',err));
+  predictRemoteKnockback(target,source);
   return true;
 }
 
 function stopMatchPlayerSync(removeMeshes=true){
-  if(removeMeshes){stopCombatSync();stopSharedWorldSync(true);}
+  if(removeMeshes){stopCombatSync();stopSharedWorldSync(true);stopProjectileSync(true);stopRtcFastLane();}
   if(matchPlayersRef){
     matchPlayersRef.off('child_added');
     matchPlayersRef.off('child_changed');
@@ -981,13 +1136,21 @@ function startGame(){
   listenToMatchPlayers();
   startCombatSync();
   startSharedWorldSync();
+  startProjectileSync();
 
-  // STEP 5: poll at 20 Hz, but send only when position/state actually changed.
-  // Forced combat/death/respawn packets still go immediately.
+  // Direct peers get ~30 Hz no-wait movement/combat. Firebase stays as the durable fallback.
+  if(fastNetworkTimer)clearInterval(fastNetworkTimer);
+  fastNetworkTimer=setInterval(()=>sendLocalFastState(false),33);
+  if(rtcPingTimer)clearInterval(rtcPingTimer);
+  rtcPingTimer=setInterval(()=>{
+    const sent=performance.now(),id=++rtcPingSeq;
+    for(const uid of Object.keys(rtcPeers))sendFastToPeer(uid,{t:'ping',id,sent},true);
+  },1000);
   if(networkTimer)clearInterval(networkTimer);
   networkTimer=setInterval(()=>sendLocalPlayerState(false),50);
 
-  document.getElementById('netBadge').textContent='FIREBASE LIVE • '+team.toUpperCase()+' • SMOOTH 20HZ';
+  updateNetworkBadge();
+  sendLocalFastState(true);
   sendLocalPlayerState(true);
   ui();
   toast(TEAM[team].name+' Team — live multiplayer connected!');
@@ -1025,7 +1188,7 @@ function updateUpgradeUI(){
     }
   }
 }
-// ===== STEP 5 SHARED FIREBASE WORLD: WOOL BLOCKS + BEDS =====
+// ===== STEP 6 SHARED FIREBASE WORLD: WOOL BLOCKS + BEDS =====
 const sharedBlockMeshes={};
 let sharedBlocksRef=null;
 let sharedBlockAdded=null,sharedBlockChanged=null,sharedBlockRemoved=null;
@@ -1143,6 +1306,126 @@ function damageSharedBed(team,amount,by='Player'){
       publishMatchEvent(`${by} destroyed ${TEAM[team].name} Bed!`,'bed');
     }
   },false);
+}
+
+
+// ===== STEP 6 SHARED PROJECTILES + EXPLOSIONS =====
+const sharedProjectileObjects={};
+const explosionFx=[];
+const processedExplosionIds=new Set();
+let sharedProjectilesRef=null,sharedProjectileAdded=null,sharedProjectileRemoved=null;
+let sharedExplosionsRef=null,sharedExplosionAdded=null;
+let lastProjectileTick=performance.now();
+
+function projectileListForType(type){return type==='arrow'?arrows:type==='fireball'?fireballs:tnts}
+function projectileMesh(type){
+  if(type==='arrow')return box(.12,.12,.75,0x8b5a2b);
+  if(type==='fireball')return new THREE.Mesh(new THREE.SphereGeometry(.48,12,12),material(0xff6b22));
+  return box(2,2,2,0xc92f2f);
+}
+function receiveSharedProjectile(id,data,source='firebase'){
+  if(!id||sharedProjectileObjects[id]||!data?.type)return sharedProjectileObjects[id]||null;
+  const type=data.type;
+  if(!['arrow','fireball','tnt'].includes(type))return null;
+  const m=projectileMesh(type);
+  const start=new THREE.Vector3(Number(data.x)||0,Number(data.y)||0,Number(data.z)||0);
+  const dir=new THREE.Vector3(Number(data.dx)||0,Number(data.dy)||0,Number(data.dz)||0);
+  if(dir.lengthSq()<.0001)dir.set(0,0,-1);else dir.normalize();
+  const speed=Number(data.speed)||(type==='arrow'?50:type==='fireball'?40:0);
+  const spawnedAt=Number(data.spawnedAt)||Date.now();
+  const elapsed=Math.max(0,Math.min(.45,(Date.now()-spawnedAt)/1000));
+  m.position.copy(start);
+  if(type!=='tnt')m.position.addScaledVector(dir,speed*elapsed);
+  if(type==='arrow')m.lookAt(m.position.clone().add(dir));
+  scene.add(m);
+  const p={id,type,mesh:m,vel:dir.multiplyScalar(speed),ownerId:data.ownerId||'',ownerName:data.ownerName||'Player',
+    ownerTeam:data.ownerTeam||'',spawnedAt,lifeMs:Number(data.lifeMs)||(type==='arrow'?2600:2200),
+    explodeAt:type==='tnt'?Date.now()+Math.max(50,(Number(data.fuseMs)||2500)-Math.max(0,Math.min(450,Date.now()-spawnedAt))):0,
+    localOwned:data.ownerId===playerSessionId,removed:false};
+  sharedProjectileObjects[id]=p;projectileListForType(type).push(p);
+  return p;
+}
+function removeSharedProjectileLocal(id){
+  const p=sharedProjectileObjects[id];if(!p)return;
+  p.removed=true;scene.remove(p.mesh);
+  const arr=projectileListForType(p.type),i=arr.indexOf(p);if(i>=0)arr.splice(i,1);
+  delete sharedProjectileObjects[id];
+}
+function requestRemoveSharedProjectile(id){
+  if(!id)return;
+  removeSharedProjectileLocal(id);
+  broadcastFast({t:'projectileRemove',id},true);
+  if(lobbyState.code)db.ref(`rooms/${lobbyState.code}/world/projectiles/${id}`).remove().catch(()=>{});
+}
+function publishSharedProjectile(type,start,dir,extra={}){
+  if(!lobbyState.code||!firebaseUser)return null;
+  const id=newNetId(type);
+  const d=dir.clone();if(d.lengthSq()<.0001)d.set(0,0,-1);d.normalize();
+  const data={type,ownerId:playerSessionId,ownerName:lobbyState.name||'Player',ownerTeam:myTeam(),
+    x:+start.x.toFixed(3),y:+start.y.toFixed(3),z:+start.z.toFixed(3),dx:+d.x.toFixed(5),dy:+d.y.toFixed(5),dz:+d.z.toFixed(5),
+    speed:extra.speed||(type==='arrow'?50:type==='fireball'?40:0),lifeMs:extra.lifeMs||(type==='arrow'?2600:2200),
+    fuseMs:extra.fuseMs||0,spawnedAt:Date.now()};
+  receiveSharedProjectile(id,data,'local');
+  broadcastFast({t:'projectile',id,d:data},true);
+  db.ref(`rooms/${lobbyState.code}/world/projectiles/${id}`).set({...data,serverAt:firebase.database.ServerValue.TIMESTAMP})
+    .catch(err=>{console.error('Projectile sync error',err);requestRemoveSharedProjectile(id)});
+  return sharedProjectileObjects[id]||null;
+}
+function startProjectileSync(){
+  if(!lobbyState.code||!firebaseUser)return;
+  stopProjectileSync(false);
+  sharedProjectilesRef=db.ref(`rooms/${lobbyState.code}/world/projectiles`);
+  sharedProjectileAdded=sharedProjectilesRef.on('child_added',snap=>receiveSharedProjectile(snap.key,snap.val()||{},'firebase'));
+  sharedProjectileRemoved=sharedProjectilesRef.on('child_removed',snap=>removeSharedProjectileLocal(snap.key));
+  sharedExplosionsRef=db.ref(`rooms/${lobbyState.code}/world/explosions`);
+  sharedExplosionAdded=sharedExplosionsRef.on('child_added',snap=>handleExplosionEvent({id:snap.key,...(snap.val()||{})},'firebase'));
+}
+function stopProjectileSync(removeMeshes=true){
+  if(sharedProjectilesRef){sharedProjectilesRef.off('child_added',sharedProjectileAdded);sharedProjectilesRef.off('child_removed',sharedProjectileRemoved);sharedProjectilesRef=null;}
+  if(sharedExplosionsRef){sharedExplosionsRef.off('child_added',sharedExplosionAdded);sharedExplosionsRef=null;}
+  sharedProjectileAdded=sharedProjectileRemoved=sharedExplosionAdded=null;
+  if(removeMeshes)for(const id of Object.keys(sharedProjectileObjects))removeSharedProjectileLocal(id);
+}
+function makeExplosionFx(pos,radius){
+  const m=new THREE.Mesh(new THREE.SphereGeometry(1,14,14),new THREE.MeshBasicMaterial({color:0xffb13b,transparent:true,opacity:.72,depthWrite:false}));
+  m.position.copy(pos);m.scale.setScalar(.4);scene.add(m);explosionFx.push({mesh:m,age:0,life:.32,radius});
+}
+function updateExplosionFx(dt){
+  for(let i=explosionFx.length-1;i>=0;i--){const e=explosionFx[i];e.age+=dt;const q=Math.min(1,e.age/e.life);e.mesh.scale.setScalar(.4+e.radius*q);e.mesh.material.opacity=.72*(1-q);if(q>=1){scene.remove(e.mesh);explosionFx.splice(i,1)}}
+}
+function handleExplosionEvent(evt,source='firebase'){
+  const id=evt?.id;if(!id||processedExplosionIds.has(id))return;
+  processedExplosionIds.add(id);setTimeout(()=>processedExplosionIds.delete(id),12000);
+  const pos=new THREE.Vector3(Number(evt.x)||0,Number(evt.y)||0,Number(evt.z)||0);
+  const radius=Math.max(1,Number(evt.radius)||8);makeExplosionFx(pos,radius*.18);toast('💥 BOOM!');
+
+  if(!isDead&&!finalDead&&!matchOver){
+    const center=player.position.clone().add(new THREE.Vector3(0,2,0));const dist=center.distanceTo(pos);
+    const teammate=evt.ownerTeam===myTeam()&&evt.ownerId!==playerSessionId;
+    if(dist<=radius&&!teammate){
+      const falloff=Math.max(.38,1-dist/radius*.62);
+      const raw=Math.max(1,Math.round((Number(evt.damage)||25)*falloff));
+      applyIncomingPlayerHit({hitId:`expl_${id}_${playerSessionId}`,attackerId:evt.ownerId,attackerName:evt.ownerName||'Explosion',attackerTeam:evt.ownerTeam,
+        victimId:playerSessionId,rawDamage:raw,source:evt.source||'explosion',fromX:pos.x,fromY:pos.y,fromZ:pos.z,
+        kbStrength:(Number(evt.kb)||1.05)*Math.max(.45,falloff),verticalKb:(Number(evt.verticalKb)||.34)*Math.max(.55,falloff)});
+    }
+  }
+
+  // Only the projectile owner edits the shared build layer; everyone sees those Firebase removals.
+  if(evt.ownerId===playerSessionId){
+    const blockRadius=Number(evt.blockRadius)||0;
+    if(blockRadius>0){for(const bl of [...blocks])if(bl.userData?.breakable&&bl.userData?.firebaseBlockId&&bl.position.distanceTo(pos)<=blockRadius)requestRemoveSharedBlock(bl);}
+  }
+}
+function publishExplosionForProjectile(p){
+  if(!p||!lobbyState.code)return;
+  const id=`exp_${p.id}`;
+  const isTnt=p.type==='tnt';
+  const evt={id,ownerId:p.ownerId,ownerName:p.ownerName,ownerTeam:p.ownerTeam,source:p.type,
+    x:+p.mesh.position.x.toFixed(3),y:+p.mesh.position.y.toFixed(3),z:+p.mesh.position.z.toFixed(3),
+    radius:isTnt?10:8,damage:isTnt?35:25,kb:isTnt?1.25:1.05,verticalKb:isTnt?.42:.34,blockRadius:isTnt?8:5,createdAt:Date.now()};
+  handleExplosionEvent(evt,'local');broadcastFast({t:'explosion',e:evt},true);
+  db.ref(`rooms/${lobbyState.code}/world/explosions/${id}`).set({...evt,serverAt:firebase.database.ServerValue.TIMESTAMP}).catch(()=>{});
 }
 
 // ===== GROUND / BLOCKS =====
@@ -1405,7 +1688,7 @@ function attack(){
 
   const dmg=selected===2?8:swordDamage(inv.sword);
 
-  // STEP 4: target real Firebase players first.
+  // STEP 6: target real multiplayer players using the P2P/Firebase fast combat path.
   let target=null,dist=6;
   for(const r of Object.values(remotePlayers)){
     if(r.dead||r.finalDead||r.team===myTeam()||!r.mesh.visible)continue;
@@ -1425,7 +1708,7 @@ function attack(){
   }
   if(target&&target.mesh&&target.hp!==undefined){hitBot(target,dmg,player.position);return}
 
-  // STEP 5: bed damage is a Firebase transaction, so every country/device sees one result.
+  // Shared bed damage remains a Firebase transaction so every device sees one result.
   for(const t of enemies(myTeam())){
     const bd=beds[t];
     if(bd.alive&&player.position.distanceTo(bd.mesh.position)<6){
@@ -1485,9 +1768,26 @@ function playerDeath(by='Void'){
   },1000);
 }
 function eat(){if(inv.gapples<=0||health>=100)return;inv.gapples--;health=Math.min(100,health+30);toast('+30 HP');ui()}
-function shootArrow(owner,targetPos,botOwner=false){const start=(botOwner?owner.mesh.position:player.position).clone().add(new THREE.Vector3(0,3,0));const a=box(.12,.12,.7,0x8b5a2b);a.position.copy(start);a.lookAt(targetPos);scene.add(a);arrows.push({mesh:a,vel:targetPos.clone().sub(start).normalize().multiplyScalar(.85),owner,botOwner,life:120});}
-function fireball(){if(inv.fireballs<=0)return;inv.fireballs--;const start=player.position.clone().add(new THREE.Vector3(0,3,0));const m=new THREE.Mesh(new THREE.SphereGeometry(.45,12,12),material(0xff6b22));m.position.copy(start);scene.add(m);const dir=new THREE.Vector3(0,0,-1).applyAxisAngle(new THREE.Vector3(0,1,0),player.rotation.y);fireballs.push({mesh:m,vel:dir.multiplyScalar(.7),life:100});ui()}
-function tntPlace(){if(inv.tnt<=0)return;const f=new THREE.Vector3(0,0,-1).applyAxisAngle(new THREE.Vector3(0,1,0),player.rotation.y);const m=addBox(player.position.x+f.x*4,player.position.y+1,player.position.z+f.z*4,2,2,2,0xc92f2f);tnts.push({mesh:m,at:performance.now()+2500});inv.tnt--;ui();toast('TNT placed — RUN!')}
+function shootArrow(owner,targetPos,botOwner=false){
+  if(botOwner)return; // bots are disabled in real multiplayer
+  const start=player.position.clone().add(new THREE.Vector3(0,3,0));
+  const dir=targetPos.clone().sub(start).normalize();
+  publishSharedProjectile('arrow',start,dir,{speed:50,lifeMs:2600});
+}
+function fireball(){
+  if(inv.fireballs<=0)return;
+  inv.fireballs--;
+  const start=player.position.clone().add(new THREE.Vector3(0,3,0));
+  const dir=new THREE.Vector3(0,0,-1).applyAxisAngle(new THREE.Vector3(0,1,0),player.rotation.y).normalize();
+  publishSharedProjectile('fireball',start,dir,{speed:40,lifeMs:2200});ui();
+}
+function tntPlace(){
+  if(inv.tnt<=0)return;
+  const f=new THREE.Vector3(0,0,-1).applyAxisAngle(new THREE.Vector3(0,1,0),player.rotation.y);
+  const start=player.position.clone().addScaledVector(f,4).add(new THREE.Vector3(0,1,0));
+  publishSharedProjectile('tnt',start,new THREE.Vector3(0,0,0),{speed:0,lifeMs:2800,fuseMs:2500});
+  inv.tnt--;ui();toast('TNT placed — RUN!');
+}
 // ===== BOTS =====
 function spawnBots(){/* Bots intentionally disabled. Multiplayer players will replace them. */}
 // remove accidental spacing property compatibility
@@ -1578,7 +1878,66 @@ function updatePlayer(){
   if(upgrades.heal>0&&player.position.distanceTo(new THREE.Vector3(TEAM[myTeam()].x,0,TEAM[myTeam()].z))<20&&health<100){
     health=Math.min(100,health+(upgrades.heal===1?.04:upgrades.heal===2?.075:.11));
   }/* Safety: combat knockback is velocity, never a teleport. */kbx=Math.max(-0.82,Math.min(0.82,kbx));kbz=Math.max(-0.82,Math.min(0.82,kbz));kbx*=.82;kbz*=.82;player.position.x+=kbx;player.position.z+=kbz;let ix=0,iz=0;if(keys.KeyW)iz-=1;if(keys.KeyS)iz+=1;if(keys.KeyA)ix-=1;if(keys.KeyD)ix+=1;const moving=ix!==0||iz!==0;if(moving){const inp=new THREE.Vector3(ix,0,iz).normalize();const f=new THREE.Vector3(-Math.sin(camYaw),0,-Math.cos(camYaw));const r=new THREE.Vector3(Math.cos(camYaw),0,-Math.sin(camYaw));const dir=new THREE.Vector3().addScaledVector(f,-inp.z).addScaledVector(r,inp.x).normalize();const speed=.30;player.position.addScaledVector(dir,speed);if(!shiftLock)player.rotation.y=Math.atan2(dir.x,dir.z)}if(shiftLock)player.rotation.y=camYaw;const gh=groundHeight(player.position.x,player.position.z);if(keys.Space&&grounded&&gh!==null){vy=.34;grounded=false}player.position.y+=vy;if(gh!==null&&player.position.y<=gh){player.position.y=gh;vy=0;grounded=true}else{vy-=.018;grounded=false}if(player.position.y<=-8&&!isDead){health=0;player.position.y=-100;playerDeath();return}if(moving&&grounded){walkT+=.18;const sw=Math.sin(walkT)*.7;player.rig.la.rotation.x=sw;if(!swing)player.rig.ra.rotation.x=-sw;player.rig.ll.rotation.x=-sw;player.rig.rl.rotation.x=sw}else if(!swing){player.rig.la.rotation.x=0;player.rig.ra.rotation.x=0;player.rig.ll.rotation.x=0;player.rig.rl.rotation.x=0}if(swing){swingP+=.08;if(swingP>=1){swing=false;swingP=0;player.rig.ra.rotation.set(0,0,0)}else{const a=Math.sin(swingP*Math.PI);player.rig.ra.rotation.x=-a*1.7;player.rig.ra.rotation.y=-a*.9}}if(upgrades.heal&&player.position.distanceTo(new THREE.Vector3(TEAM[myTeam()].x,0,TEAM[myTeam()].z))<20&&health<100){health=Math.min(100,health+.025)}}
-function updateProjectiles(){for(let i=arrows.length-1;i>=0;i--){const a=arrows[i];a.mesh.position.add(a.vel);a.life--;for(const b of bots){if(!b.dead&&!b.final&&a.mesh.position.distanceTo(b.mesh.position.clone().add(new THREE.Vector3(0,2,0)))<2){hitBot(b,12,a.botOwner?a.owner.mesh.position:player.position);a.life=0;break}}if(a.life<=0){scene.remove(a.mesh);arrows.splice(i,1)}}for(let i=fireballs.length-1;i>=0;i--){const f=fireballs[i];f.mesh.position.add(f.vel);f.life--;for(const b of bots){if(!b.dead&&!b.final&&f.mesh.position.distanceTo(b.mesh.position)<5){b.hp-=25;const d=b.mesh.position.clone().sub(f.mesh.position).setY(0).normalize();b.kbx=d.x*3;b.kbz=d.z*3;b.vy=.4;if(b.hp<=0)botDeath(b,'Fireball');f.life=0;break}}if(f.life<=0){scene.remove(f.mesh);fireballs.splice(i,1)}}for(let i=tnts.length-1;i>=0;i--){const t=tnts[i];if(performance.now()>t.at){for(const b of bots){if(b.mesh.position.distanceTo(t.mesh.position)<10){b.hp-=35;if(b.hp<=0)botDeath(b,'TNT')}}for(const bl of [...blocks]){if(bl.position.distanceTo(t.mesh.position)<8&&bl.userData.breakable){if(bl.userData.firebaseBlockId)requestRemoveSharedBlock(bl);else bl.visible=false}}scene.remove(t.mesh);tnts.splice(i,1);toast('BOOM!')}}}
+function updateProjectiles(){
+  const nowPerf=performance.now();
+  const dt=Math.max(.001,Math.min(.05,(nowPerf-lastProjectileTick)/1000));
+  lastProjectileTick=nowPerf;
+  updateExplosionFx(dt);
+
+  for(const a of [...arrows]){
+    if(a.removed||!a.mesh?.parent)continue;
+    a.mesh.position.addScaledVector(a.vel,dt);
+    a.mesh.lookAt(a.mesh.position.clone().add(a.vel));
+
+    if(a.ownerId===playerSessionId){
+      for(const r of Object.values(remotePlayers)){
+        if(r.dead||r.finalDead||r.team===a.ownerTeam||!r.mesh.visible)continue;
+        const center=r.mesh.position.clone().add(new THREE.Vector3(0,2.2,0));
+        if(a.mesh.position.distanceTo(center)<2.1){
+          const hitId=`proj_${a.id}_${r.uid}`;
+          sendPlayerHit(r,12,'arrow',hitId,{kbStrength:.48,verticalKb:.18});
+          requestRemoveSharedProjectile(a.id);break;
+        }
+      }
+    }else if(a.ownerTeam!==myTeam()&&!isDead&&!finalDead){
+      const me=player.position.clone().add(new THREE.Vector3(0,2.2,0));
+      if(a.mesh.position.distanceTo(me)<2.1){
+        applyIncomingPlayerHit({hitId:`proj_${a.id}_${playerSessionId}`,attackerId:a.ownerId,attackerName:a.ownerName,
+          attackerTeam:a.ownerTeam,victimId:playerSessionId,rawDamage:12,source:'arrow',fromX:a.mesh.position.x-a.vel.x*.02,
+          fromY:a.mesh.position.y,fromZ:a.mesh.position.z-a.vel.z*.02,kbStrength:.48,verticalKb:.18});
+        requestRemoveSharedProjectile(a.id);continue;
+      }
+    }
+    const age=Date.now()-a.spawnedAt;
+    const gh=groundHeight(a.mesh.position.x,a.mesh.position.z);
+    if(age>140&&gh!==null&&a.mesh.position.y<=gh+.55){requestRemoveSharedProjectile(a.id);continue;}
+    if(age>a.lifeMs)requestRemoveSharedProjectile(a.id);
+  }
+
+  for(const f of [...fireballs]){
+    if(f.removed||!f.mesh?.parent)continue;
+    f.mesh.position.addScaledVector(f.vel,dt);
+    let explode=false;
+    if(f.ownerId===playerSessionId){
+      for(const r of Object.values(remotePlayers)){
+        if(r.dead||r.finalDead||r.team===f.ownerTeam||!r.mesh.visible)continue;
+        if(f.mesh.position.distanceTo(r.mesh.position.clone().add(new THREE.Vector3(0,2,0)))<3.0){explode=true;break;}
+      }
+    }else if(f.ownerTeam!==myTeam()&&!isDead&&!finalDead){
+      if(f.mesh.position.distanceTo(player.position.clone().add(new THREE.Vector3(0,2,0)))<3.0)explode=true;
+    }
+    const age=Date.now()-f.spawnedAt;
+    const gh=groundHeight(f.mesh.position.x,f.mesh.position.z);
+    if(age>120&&gh!==null&&f.mesh.position.y<=gh+1.0)explode=true;
+    if(age>f.lifeMs)explode=true;
+    if(explode){publishExplosionForProjectile(f);requestRemoveSharedProjectile(f.id);}
+  }
+
+  for(const t of [...tnts]){
+    if(t.removed||!t.mesh?.parent)continue;
+    if(Date.now()>=t.explodeAt){publishExplosionForProjectile(t);requestRemoveSharedProjectile(t.id);}
+  }
+}
 function animate(){requestAnimationFrame(animate);if(gameStarted&&!matchOver){collect();updatePlayer();updateBots();updateProjectiles();updateMining();updateAlarm();updateRemotePlayers();ui();updateUpgradeUI();updateBuildPreview();const n=nearNPC();const hint=document.getElementById('hint');const guide=document.getElementById('guide');if(n&&!shopOpen&&!upgradeOpen){hint.style.display='block';hint.textContent=n.userData.type==='shop'?'🛒 CLICK SHOPKEEPER — ITEM SHOP':'⚙️ CLICK UPGRADES NPC — TEAM UPGRADES'}else hint.style.display='none';guide.style.display='block';if(n)guide.textContent=n.userData.type==='shop'?'You are at the ITEM SHOP':'You are at TEAM UPGRADES';else guide.textContent=selected===3?'🧱 BUILD MODE — Left Click = Place • White outline = placement':selected===2?'⛏️ PICKAXE — Hold Left Click on a placed block to mine it':'WASD Move • Space Jump • Shift Lock • V First Person • B Fullscreen';document.getElementById('location').textContent=player.position.z>70?'BLUE BASE':player.position.z<-70?'RED BASE':player.position.x>70?'GREEN BASE':player.position.x<-70?'YELLOW BASE':'MID';document.getElementById('location').style.display='block'}if(firstPerson){player.visible=false;const eye=player.position.clone().add(new THREE.Vector3(0,4.55,0));const dir=new THREE.Vector3(-Math.sin(camYaw)*Math.cos(camPitch),Math.sin(camPitch),-Math.cos(camYaw)*Math.cos(camPitch));camera.position.copy(eye);camera.lookAt(eye.clone().addScaledVector(dir,50))}else{player.visible=true;const center=player.position.clone().add(new THREE.Vector3(0,3,0));if(shiftLock)center.add(new THREE.Vector3(1.2,0,0).applyAxisAngle(new THREE.Vector3(0,1,0),camYaw));camera.position.set(center.x+camDist*Math.sin(camYaw)*Math.cos(camPitch),Math.max(-15,center.y-camDist*Math.sin(camPitch)),center.z+camDist*Math.cos(camYaw)*Math.cos(camPitch));camera.lookAt(center)}renderer.render(scene,camera)}animate();
 addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight)});selectSlot(1);ui();
 </script></body></html>
