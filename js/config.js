@@ -170,17 +170,17 @@ export const TIMELINE = [
 ];
 
 // ---------- KITS ----------
-// price in coins, lvl = level needed. These ids/prices must match supabase/setup.sql.
+// price in coins (no level needed — lvl is always 1). These ids/prices must match supabase/setup.sql.
 export const KITS = {
-  default: { name: 'Default', icon: '🙂', price: 0,    lvl: 1,  desc: 'No ability. Pure skill.' },
-  builder: { name: 'Builder', icon: '🧱', price: 0,    lvl: 1,  desc: '+16 wool every spawn and places blocks faster.' },
-  archer:  { name: 'Archer',  icon: '🏹', price: 400,  lvl: 2,  desc: 'Spawns with a bow + 8 arrows. Arrows deal +25% damage.' },
-  miner:   { name: 'Miner',   icon: '⛏️', price: 400,  lvl: 3,  desc: 'Spawns with a pickaxe and mines 40% faster.' },
-  medic:   { name: 'Medic',   icon: '💉', price: 700,  lvl: 5,  desc: 'Health regenerates sooner and twice as fast.' },
-  tank:    { name: 'Tank',    icon: '🛡️', price: 900,  lvl: 7,  desc: '130 max health, but 10% slower.' },
-  bomber:  { name: 'Bomber',  icon: '💣', price: 1200, lvl: 9,  desc: 'Starts with a fireball. Your own explosions never hurt you.' },
-  ninja:   { name: 'Ninja',   icon: '🥷', price: 1500, lvl: 12, desc: '12% faster and takes 60% less fall damage.' },
-  vampire: { name: 'Vampire', icon: '🧛', price: 2200, lvl: 15, desc: 'Heals 3 health every time your sword hits.' },
+  default: { name: 'Default', icon: '🙂', price: 0,    lvl: 1,   desc: 'No ability. Pure skill.' },
+  builder: { name: 'Builder', icon: '🧱', price: 0,    lvl: 1,   desc: '+16 wool every spawn and places blocks faster.' },
+  archer:  { name: 'Archer',  icon: '🏹', price: 400,  lvl: 1,   desc: 'Spawns with a bow + 8 arrows. Arrows deal +25% damage.' },
+  miner:   { name: 'Miner',   icon: '⛏️', price: 400,  lvl: 1,   desc: 'Spawns with a pickaxe and mines 40% faster.' },
+  medic:   { name: 'Medic',   icon: '💉', price: 700,  lvl: 1,   desc: 'Health regenerates sooner and twice as fast.' },
+  tank:    { name: 'Tank',    icon: '🛡️', price: 900,  lvl: 1,   desc: '130 max health, but 10% slower.' },
+  bomber:  { name: 'Bomber',  icon: '💣', price: 1200, lvl: 1,   desc: 'Starts with a fireball. Your own explosions never hurt you.' },
+  ninja:   { name: 'Ninja',   icon: '🥷', price: 1500, lvl: 1,  desc: '12% faster and takes 60% less fall damage.' },
+  vampire: { name: 'Vampire', icon: '🧛', price: 2200, lvl: 1,  desc: 'Heals 3 health every time your sword hits.' },
 };
 export const levelNeed = (l) => 100 + (l - 1) * 40; // XP to go from level l to l+1
 
