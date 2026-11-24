@@ -77,7 +77,7 @@ export class Avatar {
     const helm = box(1.32, .5, 1.32, this.armorMat); helm.position.y = 5.1;
     this.armor.add(chest, sl, sr, helm); this.armor.visible = false; g.add(this.armor);
     this.heldId = null; this.heldMesh = null; this.team = team;
-    this.walk = 0; this.swingT = 1; this.flashT = 0;
+    this.walk = 0; this.swingT = 1; this.flashT = 0; this.stopT = 0; this.crouch = false; this.aim = 0;
     if (tag && name) this.setName(name, team);
   }
   setName(name, team) {
@@ -100,9 +100,16 @@ export class Avatar {
     if (this.heldMesh) this.hand.add(this.heldMesh);
   }
   swing() { this.swingT = 0; }
+  hitstop(t) { this.stopT = Math.max(this.stopT, t); }
   flash() { this.flashT = .18; }
   animate(dt, moving, airborne) {
     const s = this;
+    // hit freeze: hold the pose for a few frames so hits feel heavy
+    if (s.stopT > 0) { s.stopT -= dt; dt *= .1; }
+    // crouch: lean forward and sink a little
+    const cy = s.crouch ? -.45 : 0;
+    s.torso.rotation.x += ((s.crouch ? .35 : 0) - s.torso.rotation.x) * Math.min(1, dt * 14);
+    s.torso.position.y = 3 + cy; s.head.position.y = 4.6 + cy * 1.6; s.la.position.y = 4 + cy * 1.3; s.ra.position.y = 4 + cy * 1.3; s.armor.position.y = cy;
     if (moving) s.walk += dt * 11; else s.walk *= .85;
     const sw = moving ? Math.sin(s.walk) * .75 : 0;
     s.la.rotation.x = airborne ? -.5 : sw;
@@ -112,8 +119,11 @@ export class Avatar {
       s.swingT = Math.min(1, s.swingT + dt * 4.5);
       const a = Math.sin(s.swingT * Math.PI);
       s.ra.rotation.x = -.4 - a * 1.6; s.ra.rotation.y = -a * .6;
+    } else if (s.aim > 0) {
+      // drawing a bow: both arms up and forward, pulled back as it charges
+      s.ra.rotation.x = -1.55; s.ra.rotation.y = -.2; s.la.rotation.x = -1.45 + s.aim * .25; s.la.rotation.y = .5;
     } else {
-      s.ra.rotation.x = s.heldId ? -.35 + (airborne ? -.3 : -sw * .4) : -sw; s.ra.rotation.y = 0;
+      s.ra.rotation.x = s.heldId ? -.35 + (airborne ? -.3 : -sw * .4) : -sw; s.ra.rotation.y = 0; s.la.rotation.y = 0;
     }
     if (s.flashT > 0) {
       s.flashT -= dt;

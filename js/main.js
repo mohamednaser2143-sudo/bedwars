@@ -8,7 +8,7 @@ import { closeShop, closeUpgrades } from './shop.js';
 import { closeInventory } from './invui.js';
 import { $, show, hide, toast } from './ui.js';
 import * as net from './net.js';
-import { allCells } from './grid.js';
+import { allCells, updateBlockAnims } from './grid.js';
 
 loadSettings();
 initEngine();
@@ -66,6 +66,7 @@ function loop(t) {
   updateCamera(dt);
   updateEnvironment(dt);
   updateParticles(dt);
+  updateBlockAnims(dt);
   G.renderer.render(G.scene, G.camera);
 }
 

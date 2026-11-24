@@ -7,7 +7,7 @@
 export const SUPABASE_URL = 'https://xqftxszpozrpuzhsnyho.supabase.co';
 export const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhxZnR4c3pwb3pycHV6aHNueWhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTIwNTY0MTcsImV4cCI6MjEwNzYzMjQxN30.JZQ7DkEmvGomqSsmrATG1Kwus_mxMksMbW7dJvh-VM4';
 
-export const VERSION = '2.0 Stage 1';
+export const VERSION = '2.1';
 
 // One block = 3 world units. Cell (gx,gy,gz) spans
 // x: gx*3-1.5..gx*3+1.5, y: gy*3-3..gy*3, z: gz*3-1.5..gz*3+1.5
@@ -41,6 +41,8 @@ export const COMBAT = {
   regenRate: 3,        // hp per second
   respawn: 5000,       // ms
   spawnProtect: 2000,  // ms of invulnerability after respawn
+  fallSafe: 13.5,      // can fall 4.5 blocks safely
+  fallDmg: 2.6,        // hp per unit fallen past that
   placeReach: 15,
   mineReach: 15,
 };
@@ -154,10 +156,18 @@ export const PROT_MULT = [1, 0.92, 0.85, 0.78];
 // ---------- GENERATORS ----------
 export const GEN = {
   ironEvery: 1100, goldEvery: 6500, ironCap: 48, goldCap: 12,
-  diamondEvery: 26000, diamondCap: 4,
-  emeraldEvery: 45000, emeraldCap: 3,
+  diamondEvery: [26000, 19000, 13000], diamondCap: 5,   // per tier (I, II, III)
+  emeraldEvery: [45000, 34000, 24000], emeraldCap: 4,
   pickupRange: 5.5,
 };
+
+// Match timeline (seconds after the start)
+export const TIMELINE = [
+  { at: 300, tier: 1, title: 'DIAMOND II  •  EMERALD II', sub: 'Generators are faster!' },
+  { at: 600, tier: 2, title: 'DIAMOND III  •  EMERALD III', sub: 'Generators are at max speed!' },
+  { at: 840, warn: true, title: 'SUDDEN DEATH IN 60s', sub: 'All beds will be destroyed!' },
+  { at: 900, sudden: true, title: 'SUDDEN DEATH', sub: 'All beds destroyed — last team standing wins!' },
+];
 
 export const BOT_NAMES = ['Rex','Nova','Blaze','Pixel','Turbo','Echo','Viper','Frost','Bolt','Mochi','Zed','Kiwi','Orbit','Rook','Juno','Dash'];
 export const BOT_DIFF = {

@@ -32,7 +32,7 @@ export function meleeTarget(e, dir) {
 export function swing(e, dir) {
   e.lastSwing = performance.now(); e.atkSeq++; e.avatar.swing();
   const t = meleeTarget(e, dir);
-  if (t) dealDamage(t, meleeDamage(e), { id: e.id, name: e.name, team: e.team, x: e.pos.x, y: e.pos.y, z: e.pos.z, source: 'melee' });
+  if (t) { dealDamage(t, meleeDamage(e), { id: e.id, name: e.name, team: e.team, x: e.pos.x, y: e.pos.y, z: e.pos.z, source: 'melee' }); if (e.kind === 'local') G.match?.shake?.(.18); }
   else if (e.kind === 'local') sfx.swing();
   return t;
 }
@@ -44,7 +44,7 @@ export function dealDamage(victim, raw, src) {
   else {
     G.match?.send?.('hit', { v: victim.id, raw, src });
     // instant feedback for the attacker
-    victim.avatar.flash(); sfx.hit();
+    victim.avatar.flash(); victim.avatar.hitstop(.075); sfx.hit();
     popNumber(victim.pos, '-' + Math.round(raw * damageMult(victim)), '#ffd34e');
     const d = new THREE.Vector3(victim.pos.x - src.x, 0, victim.pos.z - src.z);
     if (d.lengthSq() > .01) { d.normalize(); victim.target.addScaledVector(d, .9 * (src.kb ?? 1)); }
@@ -61,19 +61,39 @@ export function applyHit(v, raw, src) {
   if (src.team === v.team && src.id !== v.id) return; // no friendly fire
   let dmg = Math.max(1, Math.round(raw * damageMult(v)));
   if (src.id === v.id) dmg = Math.max(1, Math.round(dmg * .3)); // fireball jumping
+  if (src.source === 'fall') dmg = Math.max(1, Math.round(raw)); // armor doesn't help with falls
   v.hp = Math.max(0, v.hp - dmg); v.lastHurt = now;
-  if (src.id !== v.id && src.source !== 'void') v.lastHit = { id: src.id, name: src.name, team: src.team, at: now };
+  if (src.id !== v.id && src.source !== 'void' && src.source !== 'fall') v.lastHit = { id: src.id, name: src.name, team: src.team, at: now };
+  // combo knockback: each hit from the same attacker in quick succession pushes harder
+  if (src.source === 'melee') {
+    if (v.comboFrom === src.id && now - v.comboAt < 1300) v.combo = Math.min(5, (v.combo || 1) + 1); else v.combo = 1;
+    v.comboFrom = src.id; v.comboAt = now;
+  }
+  const comboMult = src.source === 'melee' ? 1 + (v.combo - 1) * .09 : 1;
   const d = new THREE.Vector3(v.pos.x - src.x, 0, v.pos.z - src.z);
-  if (d.lengthSq() > .01) {
-    d.normalize(); const k = src.kb ?? 1;
+  if (d.lengthSq() > .01 && src.source !== 'fall') {
+    d.normalize(); const k = (src.kb ?? 1) * comboMult;
     v.kb.x = d.x * COMBAT.kb * k; v.kb.z = d.z * COMBAT.kb * k;
-    v.vel.y = Math.max(v.vel.y, COMBAT.kbUp * (src.kbUp ?? k));
+    // airborne victims get less lift so combos keep them low and in reach
+    const up = COMBAT.kbUp * (src.kbUp ?? (src.kb ?? 1)) * (v.onGround ? 1 : .62);
+    v.vel.y = Math.max(v.vel.y * .4, up);
     v.onGround = false;
   }
-  v.avatar.flash();
-  popNumber(v.pos, '-' + dmg, v.kind === 'local' ? '#ff6b6b' : '#ffd34e');
-  if (v.kind === 'local') { sfx.hurt(); G.match.onLocalHurt?.(); } else sfx.hit();
+  v.avatar.flash(); v.avatar.hitstop(.075);
+  popNumber(v.pos, '-' + dmg, v.kind === 'local' ? '#ff6b6b' : v.combo > 2 ? '#ff9b3d' : '#ffd34e');
+  if (v.kind === 'local') { sfx.hurt(); G.match.onLocalHurt?.(src.source === 'fall' ? .15 : .35); } else sfx.hit();
   if (v.hp <= 0) killEntity(v, src.source || 'melee');
+}
+
+// Fall damage: call every physics step for entities simulated here.
+export function trackFall(e, wasGround) {
+  if (G.mode !== 'match' || !e.alive) return;
+  if (wasGround && !e.onGround) e.fallTop = e.pos.y;
+  else if (!e.onGround) e.fallTop = Math.max(e.fallTop ?? e.pos.y, e.pos.y);
+  else if (!wasGround && e.onGround && e.fallTop != null) {
+    const drop = e.fallTop - e.pos.y; e.fallTop = null;
+    if (drop > COMBAT.fallSafe) applyHit(e, (drop - COMBAT.fallSafe) * COMBAT.fallDmg, { id: 'fall', name: 'Fall', team: null, x: e.pos.x, y: e.pos.y, z: e.pos.z, source: 'fall' });
+  }
 }
 
 // Death of an entity simulated here (local player or our bot). Broadcasts a kill event.
@@ -109,7 +129,7 @@ export function onKillEvent(ev) {
   const m = G.match; if (!m) return;
   const vc = TEAMS[ev.victimTeam]?.css || '#fff', kc = TEAMS[ev.killerTeam]?.css || '#fff';
   const tag = ev.final ? ' <span class="final">FINAL KILL!</span>' : '';
-  const how = ev.cause === 'void' ? (ev.killer ? 'was knocked into the void by' : 'fell into the void') : ev.cause === 'arrow' ? 'was shot by' : ev.cause === 'explosion' ? 'was blown up by' : 'was slain by';
+  const how = ev.cause === 'fall' ? (ev.killer ? 'fell to their death escaping' : 'fell from a high place') : ev.cause === 'void' ? (ev.killer ? 'was knocked into the void by' : 'fell into the void') : ev.cause === 'arrow' ? 'was shot by' : ev.cause === 'explosion' ? 'was blown up by' : 'was slain by';
   if (ev.killer) killfeed(`${teamSpan(ev.victimName, vc)} ${how} ${teamSpan(ev.killerName, kc)}${tag}`);
   else killfeed(`${teamSpan(ev.victimName, vc)} ${how}${tag}`);
   const vs = m.statFor(ev.victim, ev.victimName, ev.victimTeam); if (vs) vs.deaths++;
@@ -128,14 +148,15 @@ export function onKillEvent(ev) {
 let pid = 0;
 const newId = (e) => `${e.id.slice(0, 6)}${Date.now().toString(36)}${(pid++).toString(36)}`;
 
-export function useItem(e, slot, origin, dir) {
+export function useItem(e, slot, origin, dir, power = 1) {
   const s = e.inv.slots[slot]; if (!s) return false;
   const it = ITEMS[s.id]; const now = performance.now();
   if (it.type === 'bow') {
-    if (now - (e._lastBow || 0) < 650) return false;
+    if (now - (e._lastBow || 0) < 250) return false;
     if (!e.inv.has('arrow')) { if (e.kind === 'local') toast('No arrows! Buy some in the shop'); return false; }
     e._lastBow = now; e.inv.remove('arrow', 1);
-    spawnProjectile({ id: newId(e), type: 'arrow', owner: e, pos: origin, vel: dir.clone().multiplyScalar(82) });
+    power = Math.max(.15, Math.min(1, power));
+    spawnProjectile({ id: newId(e), type: 'arrow', owner: e, pos: origin, vel: dir.clone().multiplyScalar(34 + 62 * power), power });
     sfx.bow(); e.avatar.swing(); return true;
   }
   if (it.type === 'throw') {
@@ -176,11 +197,11 @@ function projMesh(type, team) {
 }
 
 // p: {id,type,owner(Entity)|ownerInfo,pos,vel,sim}
-export function spawnProjectile({ id, type, owner, pos, vel, sim = true, ownerInfo }) {
+export function spawnProjectile({ id, type, owner, pos, vel, sim = true, ownerInfo, power = 1 }) {
   if (projs.has(id)) return;
   const info = ownerInfo || { id: owner.id, name: owner.name, team: owner.team };
   const mesh = projMesh(type, info.team); mesh.position.copy(pos); G.world.add(mesh);
-  const p = { id, type, owner: info, mesh, vel: vel.clone(), age: 0, sim, fuse: type === 'tnt' ? 3 : 0, life: type === 'arrow' ? 4 : type === 'fireball' ? 3.2 : type === 'telepearl' ? 5 : 3.5 };
+  const p = { id, type, owner: info, mesh, vel: vel.clone(), age: 0, sim, power, fuse: type === 'tnt' ? 3 : 0, life: type === 'arrow' ? 4 : type === 'fireball' ? 3.2 : type === 'telepearl' ? 5 : 3.5 };
   projs.set(id, p);
   if (sim) G.match?.send?.('proj', { id, type, o: info, p: [pos.x, pos.y, pos.z].map(n => +n.toFixed(2)), v: [vel.x, vel.y, vel.z].map(n => +n.toFixed(2)) });
 }
@@ -235,7 +256,7 @@ export function updateProjectiles(dt) {
       if (hitE || hitB) {
         done = true;
         if (p.type === 'arrow') {
-          if (hitE) dealDamage(hitE, 14, { ...p.owner, x: m.position.x - p.vel.x * .05, y: m.position.y, z: m.position.z - p.vel.z * .05, source: 'arrow', kb: .6, kbUp: .5 });
+          if (hitE) dealDamage(hitE, Math.round(5 + 15 * p.power), { ...p.owner, x: m.position.x - p.vel.x * .05, y: m.position.y, z: m.position.z - p.vel.z * .05, source: 'arrow', kb: .35 + .45 * p.power, kbUp: .45 });
           endProj(p);
         } else if (p.type === 'fireball') {
           const at = m.position.clone().addScaledVector(p.vel.clone().normalize(), -1);
@@ -258,7 +279,7 @@ function telepearlLand(owner, at) {
   // find a spot that fits the player, scanning upward
   for (let dy = 0; dy < 12; dy += .5) {
     if (canFit(at.x, at.y - 2 + dy, at.z)) {
-      e.pos.set(at.x, at.y - 2 + dy, at.z); e.vel.set(0, 0, 0); e.kb.set(0, 0, 0);
+      e.pos.set(at.x, at.y - 2 + dy, at.z); e.vel.set(0, 0, 0); e.kb.set(0, 0, 0); e.fallTop = null;
       sfx.pearl(); burst(e.center(), 0x22c7b8, 16, 8);
       if (e.kind === 'local') G.match?.onLocalChanged?.();
       return;

@@ -13,6 +13,16 @@ export const cellY = (gy) => gy * 3 - 1.5;
 export const cellId = (gx, gy, gz) => `${gx}_${gy}_${gz}`;
 export function parseId(id) { const [a, b, c] = id.split('_').map(Number); return [a, b, c]; }
 
+// little "pop" when a block is placed
+const pops = [];
+export function updateBlockAnims(dt) {
+  for (let i = pops.length - 1; i >= 0; i--) {
+    const p = pops[i]; p.t += dt;
+    const k = Math.min(1, p.t / .09); p.m.scale.setScalar(.78 + .22 * k + Math.sin(k * Math.PI) * .06); p.m.updateMatrix();
+    if (k >= 1) pops.splice(i, 1);
+  }
+}
+
 export function getCell(gx, gy, gz) { return cells.get(K(gx, gy, gz)); }
 export function clearGrid() { cells.clear(); }
 export function allCells() { return cells; }
@@ -27,7 +37,9 @@ export function setCell(gx, gy, gz, type, opts = {}) {
     const m = new THREE.Mesh(BLOCK_GEO, blockMaterial(type, c.team));
     m.position.set(cellX(gx), cellY(gy), gz * 3);
     m.castShadow = true; m.receiveShadow = true;
-    m.matrixAutoUpdate = false; m.updateMatrix();
+    m.matrixAutoUpdate = false;
+    if (opts.pop !== false && G.mode === 'match') { m.scale.setScalar(.78); pops.push({ m, t: 0 }); }
+    m.updateMatrix();
     G.world.add(m); c.mesh = m;
   }
   cells.set(k, c);

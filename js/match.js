@@ -1,13 +1,13 @@
 // Match lifecycle: setup, generators, respawns, sync, HUD, win screen.
 import { THREE, disposeGroup, setSpriteText, burst } from './engine.js';
 import { G } from './state.js';
-import { TEAMS, TEAM_KEYS, GEN, COMBAT, PHYS, ITEMS, ARMOR, UPGRADES, CURRENCY } from './config.js';
+import { TEAMS, TEAM_KEYS, GEN, COMBAT, PHYS, ITEMS, ARMOR, UPGRADES, CURRENCY, TIMELINE } from './config.js';
 import { clearGrid, setCell, removeCell, getCell, cellX, cellY } from './grid.js';
 import { moveEntity } from './physics.js';
 import { buildMatchMap } from './maps.js';
 import { Entity } from './entity.js';
 import { initBotAI, updateBot } from './bots.js';
-import { applyHit, killEntity, onKillEvent, updateProjectiles, clearProjectiles, remoteProjectile, remoteProjectileEnd } from './combat.js';
+import { applyHit, killEntity, trackFall, onKillEvent, updateProjectiles, clearProjectiles, remoteProjectile, remoteProjectileEnd } from './combat.js';
 import { applyBedDestroyed, destroyBed } from './actions.js';
 import { updateLocalMovement, updateMatchActions, resetActions, shake, setPlayerHooks, setNpcHook, closeAll } from './player.js';
 import { buildHotbar, renderHotbar, renderResources, selectSlot } from './invui.js';
@@ -29,7 +29,7 @@ export function startMatch(cfg) {
   const teams = [...new Set(cfg.roster.map(r => r.team))];
   const map = buildMatchMap(teams);
   const m = G.match = {
-    online: !!cfg.online, hostId: cfg.hostId || G.myId, teams, over: false, startedAt: performance.now(),
+    online: !!cfg.online, hostId: cfg.hostId || G.myId, teams, over: false, startedAt: performance.now(), tier: 0, nextEvent: 0, sudden: false,
     beds: map.beds, spawns: map.spawns, gens: map.gens, npcs: map.npcs, noBuild: map.noBuild,
     teamUp: Object.fromEntries(TEAM_KEYS.map(t => [t, { sharp: 0, prot: 0, haste: 0, forge: 0, heal: 0, trap: 0 }])),
     stats: {}, roster: cfg.roster,
@@ -79,7 +79,7 @@ function spawnAt(e) {
 }
 
 function respawn(e) {
-  spawnAt(e); e.hp = 100; e.dead = false; e.setVisible(true);
+  spawnAt(e); e.hp = 100; e.dead = false; e.setVisible(true); e.fallTop = null;
   e.invulnUntil = performance.now() + COMBAT.spawnProtect; e.lastHit = null;
   e.held = e.inv.best('sword'); e.avatar.setHeld(e.held); e.avatar.setArmor(e.armor);
   if (e.kind === 'local') { hide('deathScreen'); renderHotbar(true); renderResources(); toast('Respawned!'); sendState(true); }
@@ -100,7 +100,7 @@ function onLocalDeath(ev) {
   }
   sendState(true);
 }
-function onLocalHurt() { const v = $('hurtFx'); v.classList.remove('on'); void v.offsetWidth; v.classList.add('on'); sendState(true); }
+function onLocalHurt(sh = .35) { shake(sh); const v = $('hurtFx'); v.classList.remove('on'); void v.offsetWidth; v.classList.add('on'); sendState(true); }
 
 function npcInFront() {
   const e = G.local; const look = new THREE.Vector3(-Math.sin(G.cam.yaw), 0, -Math.cos(G.cam.yaw));
@@ -285,7 +285,7 @@ function updateGens(dt) {
     // diamond / emerald (shared, authority decides)
     if (auth) {
       g.t += dt * 1000;
-      const every = g.kind === 'diamond' ? GEN.diamondEvery : GEN.emeraldEvery, cap = g.kind === 'diamond' ? GEN.diamondCap : GEN.emeraldCap;
+      const every = (g.kind === 'diamond' ? GEN.diamondEvery : GEN.emeraldEvery)[m.tier], cap = g.kind === 'diamond' ? GEN.diamondCap : GEN.emeraldCap;
       if (g.t >= every) { g.t = 0; if (g.n < cap) { g.n++; m.send('gen', { i, n: g.n }); } }
     }
     if (g.n > 0) for (const e of G.entities.values()) {
@@ -299,9 +299,30 @@ function updateGens(dt) {
         break;
       }
     }
-    const left = g.kind === 'diamond' ? GEN.diamondEvery - g.t : GEN.emeraldEvery - g.t;
-    genLabel(g, `${g.kind === 'diamond' ? '💎' : '🟩'} ${g.n}${auth ? '  •  ' + Math.max(0, Math.ceil(left / 1000)) + 's' : ''}`);
+    const left = (g.kind === 'diamond' ? GEN.diamondEvery : GEN.emeraldEvery)[m.tier] - g.t;
+    genLabel(g, `${g.kind === 'diamond' ? '💎' : '🟩'} ${['I', 'II', 'III'][m.tier]}  ×${g.n}${auth ? '  •  ' + Math.max(0, Math.ceil(left / 1000)) + 's' : ''}`);
   }
+}
+
+// ---------- TIMELINE: generator tiers + sudden death ----------
+const fmt = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+function updateTimeline() {
+  const m = G.match; if (m.over) return;
+  const t = (performance.now() - m.startedAt) / 1000;
+  while (m.nextEvent < TIMELINE.length && t >= TIMELINE[m.nextEvent].at) {
+    const ev = TIMELINE[m.nextEvent++];
+    if (ev.tier) m.tier = ev.tier;
+    if (ev.sudden) {
+      m.sudden = true;
+      if (m.isAuth()) for (const tm of m.teams) if (m.beds[tm].alive) destroyBed(tm, 'Sudden Death', null, null);
+    }
+    bigMessage(ev.title, ev.sub, ev.sudden || ev.warn ? '#ff5252' : '#7eeaff', 3000);
+    if (ev.sudden || ev.warn) sfx.alarm(); else sfx.win();
+  }
+  const next = TIMELINE.slice(m.nextEvent).find(e => !e.warn);
+  const el = $('timer');
+  if (next) el.innerHTML = `<span>${next.sudden ? '☠️ Sudden Death' : next.tier === 1 ? '💎 Diamond II' : '💎 Diamond III'}</span> <b>${fmt(next.at - t)}</b>`;
+  else el.innerHTML = `<span class="sd">☠️ SUDDEN DEATH</span> <b>${fmt(t)}</b>`;
 }
 
 // ---------- MAIN UPDATE ----------
@@ -331,7 +352,9 @@ export function updateMatch(dt) {
     if (e.kind === 'bot') {
       if (m.over) continue;
       updateBot(e, dt);
+      const wg = e.onGround;
       moveEntity(e, dt);
+      trackFall(e, wg);
       e.avatar.group.rotation.y = e.yaw;
       e.avatar.setHeld(e.held);
       e.avatar.animate(dt, Math.hypot(e.vel.x, e.vel.z) > 1, !e.onGround);
@@ -358,6 +381,7 @@ export function updateMatch(dt) {
       }
     }
   }
+  updateTimeline();
   updateProjectiles(dt);
   updateGens(dt);
   if (!m.over) { sendState(); if (auth) sendBots(); }

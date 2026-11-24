@@ -160,3 +160,12 @@ tr.me td{background:#ffffff10;font-weight:800}
 #endScreen .panel{text-align:center}
 #endTitle{font-size:56px;margin:0}
 #endStats{margin-top:12px;text-align:left}
+
+/* timer + bow charge */
+#timer{position:fixed;top:54px;left:50%;transform:translateX(-50%);z-index:30;padding:5px 12px;border-radius:8px;background:#08111dcc;font:800 13px monospace;white-space:nowrap}
+#timer b{color:#ffd34e;margin-left:6px}
+#timer .sd{color:#ff5252}
+#bowCharge{position:fixed;left:50%;top:50%;width:46px;height:46px;transform:translate(-50%,-50%);z-index:31;pointer-events:none;display:none;border-radius:50%;
+  background:conic-gradient(#ffd34e calc(var(--p,0)*360deg),#ffffff22 0);-webkit-mask:radial-gradient(circle,transparent 17px,#000 18px);mask:radial-gradient(circle,transparent 17px,#000 18px)}
+#bowCharge.full{background:conic-gradient(#ff5a3c 360deg,#0000 0);animation:pulse .4s infinite alternate}
+@keyframes pulse{to{transform:translate(-50%,-50%) scale(1.12)}}

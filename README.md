@@ -16,7 +16,7 @@ A Roblox-BedWars-style game that runs in the browser. Three.js draws the game an
 - **Sound effects** made in code (no audio files), particles, screen shake, a hurt flash, a low-health warning, and a first-person held item.
 
 ## Controls
-WASD move • Space jump • Click to lock the mouse (Esc to unlock) • 1–9 hotbar • **E** inventory • **F** shop / interact • Left click attack / use / mine (hold) • Right click place blocks • **V** first person • Scroll to zoom • **T** chat • **Tab** scoreboard • **M** mute • **B** fullscreen
+WASD move • Space jump • **Shift** crouch (won't fall off edges) • Click to lock the mouse (Esc to unlock) • 1–9 hotbar • **E** inventory • **F** shop / interact • Left click attack / use / mine (hold) • Right click place blocks • **V** first person • Scroll to zoom • **T** chat • **Tab** scoreboard • **M** mute • **B** fullscreen
 
 ## Files
 ```
