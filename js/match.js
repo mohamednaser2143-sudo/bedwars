@@ -1,7 +1,8 @@
 // Match lifecycle: setup, generators, respawns, sync, HUD, win screen.
 import { THREE, disposeGroup, setSpriteText, burst } from './engine.js';
 import { G } from './state.js';
-import { TEAMS, TEAM_KEYS, GEN, COMBAT, PHYS, ITEMS, ARMOR, UPGRADES, CURRENCY, TIMELINE } from './config.js';
+import { TEAMS, TEAM_KEYS, GEN, COMBAT, PHYS, ITEMS, ARMOR, UPGRADES, CURRENCY, TIMELINE, KITS } from './config.js';
+import { A, submitMatch, levelProgress } from './account.js';
 import { clearGrid, setCell, removeCell, getCell, cellX, cellY } from './grid.js';
 import { moveEntity } from './physics.js';
 import { buildMatchMap } from './maps.js';
@@ -32,7 +33,7 @@ export function startMatch(cfg) {
     online: !!cfg.online, hostId: cfg.hostId || G.myId, teams, over: false, startedAt: performance.now(), tier: 0, nextEvent: 0, sudden: false,
     beds: map.beds, spawns: map.spawns, gens: map.gens, npcs: map.npcs, noBuild: map.noBuild,
     teamUp: Object.fromEntries(TEAM_KEYS.map(t => [t, { sharp: 0, prot: 0, haste: 0, forge: 0, heal: 0, trap: 0 }])),
-    stats: {}, roster: cfg.roster,
+    stats: {}, roster: cfg.roster, kind: cfg.kind || (cfg.online ? 'mp' : 'solo'), diff: cfg.diff || null, myBlocks: 0, myArrows: 0, submitted: false,
     send: (k, d) => { if (m.online) net.sendMatch(k, d); },
     isAuth: () => !m.online || net.authorityId(m.hostId) === G.myId,
     statFor: (id, name, team) => { if (!id) return null; return m.stats[id] ||= { name, team, kills: 0, finals: 0, beds: 0, deaths: 0 }; },
@@ -45,7 +46,10 @@ export function startMatch(cfg) {
     const kind = r.id === G.myId ? 'local' : r.bot && m.isAuth() ? 'bot' : 'remote';
     const e = new Entity({ id: r.id, name: r.name, team: r.team, kind });
     e.isBot = !!r.bot; e.diff = r.diff || 'normal';
+    e.kit = KITS[r.kit] ? r.kit : 'default'; e.maxHp = e.kit === 'tank' ? 130 : 100; e.hp = e.maxHp;
+    if (r.lvl && kind !== 'local') e.avatar.setName(`[${r.lvl}] ${r.name}`, r.team);
     e.inv.add('wood_sword', 1); e.held = 'wood_sword'; e.avatar.setHeld('wood_sword');
+    kitItems(e, true);
     spawnAt(e);
     if (kind === 'bot') initBotAI(e, e.diff);
     e.addToWorld();
@@ -70,6 +74,14 @@ export function startMatch(cfg) {
   G.renderer.domElement.focus();
 }
 
+// starting items from kits (every spawn), plus one-time extras at match start
+function kitItems(e, first) {
+  if (e.kit === 'builder') e.inv.add('wool', 16);
+  if (e.kit === 'archer') { if (!e.inv.has('bow')) e.inv.add('bow', 1); e.inv.add('arrow', 8); }
+  if (e.kit === 'miner' && !e.inv.best('pickaxe')) e.inv.add('wood_pickaxe', 1);
+  if (e.kit === 'bomber' && first) e.inv.add('fireball', 1);
+}
+
 function spawnAt(e) {
   const s = G.match.spawns[e.team];
   e.pos.set(s.x + (Math.random() - .5) * 2, s.y + .5, s.z + (Math.random() - .5) * 2);
@@ -79,8 +91,9 @@ function spawnAt(e) {
 }
 
 function respawn(e) {
-  spawnAt(e); e.hp = 100; e.dead = false; e.setVisible(true); e.fallTop = null;
+  spawnAt(e); e.hp = e.maxHp; e.dead = false; e.setVisible(true); e.fallTop = null;
   e.invulnUntil = performance.now() + COMBAT.spawnProtect; e.lastHit = null;
+  kitItems(e, false);
   e.held = e.inv.best('sword'); e.avatar.setHeld(e.held); e.avatar.setArmor(e.armor);
   if (e.kind === 'local') { hide('deathScreen'); renderHotbar(true); renderResources(); toast('Respawned!'); sendState(true); }
 }
@@ -208,6 +221,29 @@ function endMatch(winner) {
   $('endSub').innerHTML = winner ? `<b style="color:${TEAMS[winner].css}">${TEAMS[winner].name} Team</b> wins the match` : 'No team survived';
   $('endStats').innerHTML = scoreTable();
   show('endScreen');
+  sendResults(!!won);
+}
+
+// Send my match to the database (XP, coins, missions). Guests just see a hint.
+async function sendResults(won, early = false) {
+  const m = G.match; if (!m || m.submitted) return;
+  m.submitted = true;
+  const box = $('endRewards');
+  const st = m.stats[G.myId] || { kills: 0, finals: 0, beds: 0, deaths: 0 };
+  const seconds = Math.round((performance.now() - m.startedAt) / 1000);
+  if (A.guest) { box.innerHTML = `<div class="rw muted">Playing as a guest — <b>create an account</b> to earn XP, coins and kits.</div>`; return; }
+  if (seconds < 45) { box.innerHTML = `<div class="rw muted">Match too short for XP (under 45 seconds).</div>`; return; }
+  box.innerHTML = '<div class="rw muted">Saving your progress…</div>';
+  try {
+    const r = await submitMatch({ mode: m.kind, diff: m.kind === 'solo' ? m.diff : null, won, kills: st.kills, finals: st.finals, beds: st.beds, deaths: st.deaths, blocks: m.myBlocks, arrows: m.myArrows, seconds });
+    if (!r) return;
+    if (early) toast(`Progress saved: +${r.xp_gain} XP, +${r.coin_gain} coins`, 'good');
+    const lp = levelProgress();
+    box.innerHTML = `<div class="rw"><span class="xpG">+${r.xp_gain} XP</span><span class="coinG">+${r.coin_gain} 🪙</span>${r.mult !== 1 ? `<span class="muted">×${r.mult} ${m.kind === 'solo' ? (m.diff || '') + ' bots' : 'multiplayer'} bonus</span>` : ''}</div>
+      <div class="lvlRow"><b>Level ${lp.level}</b><div class="xpBar"><div style="width:${lp.into / lp.need * 100}%"></div></div><small>${lp.into} / ${lp.need} XP</small></div>
+      ${r.leveled_up ? `<div class="lvlUp">⭐ LEVEL UP! You're now level ${r.level} ⭐</div>` : ''}`;
+    if (r.leveled_up) sfx.win();
+  } catch (err) { box.innerHTML = `<div class="rw muted">Couldn't save progress: ${esc(err.message)}</div>`; }
 }
 function scoreTable() {
   const rows = Object.entries(G.match.stats).sort((a, b) => (b[1].finals * 3 + b[1].kills + b[1].beds * 4) - (a[1].finals * 3 + a[1].kills + a[1].beds * 4));
@@ -217,6 +253,7 @@ function renderScoreboard() { $('scoreboard').innerHTML = '<div class="sbT">SCOR
 
 export function leaveMatch() {
   clearInterval(deathTimer);
+  if (G.match && !G.match.submitted && !G.match.over) sendResults(false, true); // left early: still counts kills/time
   hide('endScreen'); hide('deathScreen'); hide('matchHud'); hide('hotbarWrap'); hide('scoreboard');
   if (G.match?.online) net.leaveParty();
   G.match = null;
@@ -238,9 +275,9 @@ let hudT = 0;
 function updateHud(dt) {
   hudT += dt; if (hudT < .1) return; hudT = 0;
   const e = G.local, m = G.match;
-  $('hpFill').style.width = e.hp + '%';
+  $('hpFill').style.width = (e.hp / e.maxHp * 100) + '%';
   $('hpFill').style.background = e.hp > 60 ? '#3ddc6b' : e.hp > 30 ? '#ffc23d' : '#ff4b4b';
-  $('hpText').textContent = Math.ceil(e.hp) + ' / 100';
+  $('hpText').textContent = Math.ceil(e.hp) + ' / ' + e.maxHp;
   $('lowHp').style.opacity = e.alive && e.hp < 35 ? (1 - e.hp / 35) * .8 : 0;
   renderResources(); renderHotbar(); renderTeams();
   const now = performance.now(); const fx = [];
@@ -360,8 +397,9 @@ export function updateMatch(dt) {
       e.avatar.animate(dt, Math.hypot(e.vel.x, e.vel.z) > 1, !e.onGround);
     }
     // regen + heal pool
-    if (e.hp < 100 && now - e.lastHurt > COMBAT.regenDelay) e.hp = Math.min(100, e.hp + COMBAT.regenRate * dt);
-    if (m.teamUp[e.team].heal && e.hp < 100) { const s = m.spawns[e.team]; if (Math.hypot(e.pos.x - s.x, e.pos.z - s.z) < 24) e.hp = Math.min(100, e.hp + 2.5 * dt); }
+    const medic = e.kit === 'medic';
+    if (e.hp < e.maxHp && now - e.lastHurt > (medic ? 2000 : COMBAT.regenDelay)) e.hp = Math.min(e.maxHp, e.hp + COMBAT.regenRate * (medic ? 2 : 1) * dt);
+    if (m.teamUp[e.team].heal && e.hp < e.maxHp) { const s = m.spawns[e.team]; if (Math.hypot(e.pos.x - s.x, e.pos.z - s.z) < 24) e.hp = Math.min(e.maxHp, e.hp + 2.5 * dt); }
     // void
     if (e.pos.y < PHYS.voidY && !m.over) { e.lastHurt = now; killEntity(e, 'void'); if (e.kind === 'local') sendState(true); }
   }

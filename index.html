@@ -14,15 +14,16 @@
 
 <div id="loading"><div class="spin"></div><b>Loading Fight On A Baseplate…</b><small>If this never goes away, your network may be blocking cdn.jsdelivr.net</small></div>
 
-<!-- name prompt -->
+<!-- start screen: log in / sign up / guest -->
 <div id="nameModal" class="modal">
   <div class="panel narrow">
     <div class="logo">FIGHT ON A <span>BASEPLATE</span></div>
-    <p class="muted">BedWars in your browser. Pick a name to enter the lobby.</p>
-    <input id="nameInput" maxlength="16" placeholder="Your name" autocomplete="off">
-    <button class="bigBtn" id="nameGo">ENTER LOBBY ▶</button>
+    <p class="muted">BedWars in your browser. Log in to save your levels, coins and kits.</p>
+    <div id="authBody"></div>
   </div>
 </div>
+
+<div id="bannedModal" class="modal"><div class="panel narrow"><h2>🚫 Account banned</h2><p class="muted">This account has been banned by an admin.</p><button class="btn" onclick="localStorage.removeItem('fob-auth');location.reload()">Use another account</button></div></div>
 
 <!-- overlays shared by hub + match -->
 <div id="crosshair"></div>
@@ -42,12 +43,22 @@
     <div class="hubCard">
       <div class="logo sm">FIGHT ON A <span>BASEPLATE</span></div>
       <div class="hubMeta"><b id="hubName"></b> • <span id="hubOnline">—</span> • <span id="hubNet" class="net">● …</span> • <span id="hubVer" class="muted"></span></div>
+      <div id="hubLevel" class="hubLevel"></div>
     </div>
+  </div>
+  <div class="hubSide">
+    <button class="sideBtn" id="btnKits">🎒<span>Kits</span></button>
+    <button class="sideBtn" id="btnMissions">📜<span>Missions</span></button>
+    <button class="sideBtn" id="btnProfile">👤<span>Profile</span></button>
+    <button class="sideBtn" id="btnLeader">🏆<span>Leaders</span></button>
+    <button class="sideBtn" id="btnFriends">🤝<span>Friends</span></button>
+    <button class="sideBtn" id="btnSettings">⚙️<span>Settings</span></button>
+    <button class="sideBtn admin" id="btnAdmin">🛠️<span>Admin</span></button>
   </div>
   <div class="hubButtons">
     <button class="hubBtn solo" id="btnSolo">🤖 SOLO VS BOTS</button>
-    <button class="hubBtn multi" id="btnMulti">🌐 MULTIPLAYER</button>
-    <button class="hubBtn set" id="btnSettings">⚙️</button>
+    <button class="hubBtn quick" id="btnQuick">⚡ QUICK PLAY</button>
+    <button class="hubBtn multi" id="btnMulti">🌐 PARTY</button>
   </div>
   <div class="hubTip">Walk into a portal or use the buttons • Click the screen to look around • T to chat</div>
 </div>
@@ -109,6 +120,7 @@
   <div class="panel">
     <h1 id="endTitle">VICTORY!</h1>
     <p id="endSub"></p>
+    <div id="endRewards"></div>
     <div id="endStats"></div>
     <button class="bigBtn" id="endBack">BACK TO LOBBY</button>
   </div>

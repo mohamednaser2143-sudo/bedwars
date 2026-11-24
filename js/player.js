@@ -93,6 +93,7 @@ export function updateLocalMovement(dt) {
   const now = performance.now();
   let sp = PHYS.walk; if (e.effects.speed > now) sp *= 1.35; if (e.effects.slow > now) sp *= .5;
   e.crouch = !!(k.ShiftLeft || k.ShiftRight); e.avatar.crouch = e.crouch;
+  if (e.kit === 'tank') sp *= .9; if (e.kit === 'ninja') sp *= 1.12;
   if (e.crouch) sp *= .38;
   if (bowCharge.on) sp *= .55;
   if (len > 0) { mx /= len; mz /= len; }
@@ -249,6 +250,7 @@ export function mineTime(cell) {
   let sp = pick ? ITEMS[pick].speed : 1;
   const held = heldDef(); if (held?.type === 'pickaxe') sp *= 1.15;
   sp *= 1 + .25 * (G.match?.teamUp[e.team]?.haste || 0);
+  if (e.kit === 'miner') sp *= 1.4;
   return BLOCKS[cell.type].hard / sp;
 }
 
@@ -296,11 +298,11 @@ function bridgeCell(e, gy) {
   return null;
 }
 function tryPlace() {
-  const now = performance.now(); if (now - lastPlace < 90) return;
+  const now = performance.now(); if (now - lastPlace < (G.local.kit === 'builder' ? 60 : 90)) return;
   const e = G.local, s = e.inv.slots[G.selected]; if (!s) return;
   const t = placeTarget(); if (!t) return;
   if (placeBlock(t[0], t[1], t[2], ITEMS[s.id].block, e.team)) {
-    lastPlace = now; e.inv.takeFromSlot(G.selected, 1); e.avatar.swing(); sfx.place(); renderHotbar(true);
+    lastPlace = now; e.inv.takeFromSlot(G.selected, 1); e.avatar.swing(); sfx.place(); renderHotbar(true); if (G.match) G.match.myBlocks++;
   }
 }
 

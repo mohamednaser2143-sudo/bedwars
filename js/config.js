@@ -4,10 +4,10 @@
 // ============================================================
 
 // Supabase (Realtime only — no tables needed). Anon/public key is safe in the browser.
-export const SUPABASE_URL = 'https://xqftxszpozrpuzhsnyho.supabase.co';
-export const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhxZnR4c3pwb3pycHV6aHNueWhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTIwNTY0MTcsImV4cCI6MjEwNzYzMjQxN30.JZQ7DkEmvGomqSsmrATG1Kwus_mxMksMbW7dJvh-VM4';
+export const SUPABASE_URL = 'https://peztvgqqsffcztdfqchx.supabase.co';
+export const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBlenR2Z3Fxc2ZmY3p0ZGZxY2h4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTU1MTIyOTEsImV4cCI6MjExMTA4ODI5MX0.jSOjHRIFnxLFZgnlTQRJKFEBjm3ybPrP9CD02a_0rsw';
 
-export const VERSION = '2.1';
+export const VERSION = '3.0';
 
 // One block = 3 world units. Cell (gx,gy,gz) spans
 // x: gx*3-1.5..gx*3+1.5, y: gy*3-3..gy*3, z: gz*3-1.5..gz*3+1.5
@@ -168,6 +168,21 @@ export const TIMELINE = [
   { at: 840, warn: true, title: 'SUDDEN DEATH IN 60s', sub: 'All beds will be destroyed!' },
   { at: 900, sudden: true, title: 'SUDDEN DEATH', sub: 'All beds destroyed — last team standing wins!' },
 ];
+
+// ---------- KITS ----------
+// price in coins, lvl = level needed. These ids/prices must match supabase/setup.sql.
+export const KITS = {
+  default: { name: 'Default', icon: '🙂', price: 0,    lvl: 1,  desc: 'No ability. Pure skill.' },
+  builder: { name: 'Builder', icon: '🧱', price: 0,    lvl: 1,  desc: '+16 wool every spawn and places blocks faster.' },
+  archer:  { name: 'Archer',  icon: '🏹', price: 400,  lvl: 2,  desc: 'Spawns with a bow + 8 arrows. Arrows deal +25% damage.' },
+  miner:   { name: 'Miner',   icon: '⛏️', price: 400,  lvl: 3,  desc: 'Spawns with a pickaxe and mines 40% faster.' },
+  medic:   { name: 'Medic',   icon: '💉', price: 700,  lvl: 5,  desc: 'Health regenerates sooner and twice as fast.' },
+  tank:    { name: 'Tank',    icon: '🛡️', price: 900,  lvl: 7,  desc: '130 max health, but 10% slower.' },
+  bomber:  { name: 'Bomber',  icon: '💣', price: 1200, lvl: 9,  desc: 'Starts with a fireball. Your own explosions never hurt you.' },
+  ninja:   { name: 'Ninja',   icon: '🥷', price: 1500, lvl: 12, desc: '12% faster and takes 60% less fall damage.' },
+  vampire: { name: 'Vampire', icon: '🧛', price: 2200, lvl: 15, desc: 'Heals 3 health every time your sword hits.' },
+};
+export const levelNeed = (l) => 100 + (l - 1) * 40; // XP to go from level l to l+1
 
 export const BOT_NAMES = ['Rex','Nova','Blaze','Pixel','Turbo','Echo','Viper','Frost','Bolt','Mochi','Zed','Kiwi','Orbit','Rook','Juno','Dash'];
 export const BOT_DIFF = {

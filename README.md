@@ -1,4 +1,16 @@
-# Fight On A Baseplate — BedWars (v2, Stage 1)
+# Fight On A Baseplate — BedWars (v3)
+
+**First time? Read `SETUP.md`.** It covers turning off email confirmation, running the database script, and making yourself admin.
+
+## New in v3
+- **Accounts** (username + password, no email needed). Your levels, XP, coins, kits, stats and missions are saved, and you stay logged in on your device.
+- **XP and levels** from playing (time, kills, finals, beds, blocks, arrows), with bigger multipliers for harder bots and for multiplayer.
+- **Coins and 9 kits** with abilities: Builder, Archer, Miner, Medic, Tank, Bomber, Ninja and Vampire.
+- **Daily and weekly missions** with XP and coin rewards.
+- **Profile** with full stats and match history. **Leaderboards** (all-time and weekly), plus a 3D top-players board in the lobby.
+- **Quick Play** matchmaking, **public parties** and **friends**, with invites straight into your party.
+- **Admin panel:** reset passwords, give coins/XP/kits, rename, ban, make admins.
+- Guests can still play, but nothing is saved.
 
 A Roblox-BedWars-style game that runs in the browser. Three.js draws the game and Supabase Realtime handles multiplayer.
 
@@ -38,7 +50,10 @@ js/bots.js        bot AI
 js/maps.js        match map + hub map
 js/match.js       match flow, generators, respawns, win screen, multiplayer sync
 js/hub.js         hub lobby, menus, party screen, settings
-js/net.js         Supabase Realtime (hub presence, parties, match messages)
+js/net.js         Supabase Realtime (hub presence, parties, Quick Play, invites)
+js/account.js     accounts, profile, XP/coins, kits, missions, friends, admin calls
+js/menus.js       all lobby menus (play, party, kits, missions, profile, leaderboards, friends, settings, admin)
+supabase/setup.sql  the database: tables, security rules, and all the server-side rules
 js/ui.js, js/audio.js   small helpers
 ```
 
@@ -52,13 +67,12 @@ The game won't run if you just double-click `index.html`, because browsers block
 Vercel works too: import the repo as a static site, with no build step.
 
 ## Supabase
-- It only uses **Realtime Broadcast + Presence**. There are no tables and no SQL.
+- Realtime is used for the lobby and matches. The database (from `setup.sql`) stores accounts and progress.
 - The URL and anon key are in `js/config.js`. The anon key is public by design. Never put the `service_role` key here.
 - If your project has *Realtime → "Private channels only"* switched on, turn it off. This game uses public channels.
 - Free-plan Realtime has message-rate limits. Each player sends about 9 updates a second, and the host sends bot updates about 7 times a second. 2–4 players should be fine. If big matches start to stutter, that limit is the likely cause.
 
-## Next stages (planned)
-- Kits (like Roblox BedWars), cosmetics and skins
-- Leaderboards and saved stats (this would use Supabase tables)
-- More maps, sudden death, more items (shears, wood axe, balloons)
+## Next ideas
+- Cosmetics (skins, bed designs, kill effects) bought with coins
+- More maps and items (shears, axes, balloons)
 - Mobile touch controls

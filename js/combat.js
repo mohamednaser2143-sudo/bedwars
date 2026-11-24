@@ -32,6 +32,7 @@ export function meleeTarget(e, dir) {
 export function swing(e, dir) {
   e.lastSwing = performance.now(); e.atkSeq++; e.avatar.swing();
   const t = meleeTarget(e, dir);
+  if (t && e.kit === 'vampire') e.hp = Math.min(e.maxHp, e.hp + 3);
   if (t) { dealDamage(t, meleeDamage(e), { id: e.id, name: e.name, team: e.team, x: e.pos.x, y: e.pos.y, z: e.pos.z, source: 'melee' }); if (e.kind === 'local') G.match?.shake?.(.18); }
   else if (e.kind === 'local') sfx.swing();
   return t;
@@ -60,9 +61,9 @@ export function applyHit(v, raw, src) {
   if (now < v.invulnUntil) return;
   if (src.team === v.team && src.id !== v.id) return; // no friendly fire
   let dmg = Math.max(1, Math.round(raw * damageMult(v)));
-  if (src.id === v.id) dmg = Math.max(1, Math.round(dmg * .3)); // fireball jumping
-  if (src.source === 'fall') dmg = Math.max(1, Math.round(raw)); // armor doesn't help with falls
-  v.hp = Math.max(0, v.hp - dmg); v.lastHurt = now;
+  if (src.id === v.id) dmg = v.kit === 'bomber' ? 0 : Math.max(1, Math.round(dmg * .3)); // fireball jumping
+  if (src.source === 'fall') dmg = Math.max(1, Math.round(raw * (v.kit === 'ninja' ? .4 : 1))); // armor doesn't help with falls
+  v.hp = Math.max(0, v.hp - dmg); if (dmg > 0) v.lastHurt = now;
   if (src.id !== v.id && src.source !== 'void' && src.source !== 'fall') v.lastHit = { id: src.id, name: src.name, team: src.team, at: now };
   // combo knockback: each hit from the same attacker in quick succession pushes harder
   if (src.source === 'melee') {
@@ -156,7 +157,7 @@ export function useItem(e, slot, origin, dir, power = 1) {
     if (!e.inv.has('arrow')) { if (e.kind === 'local') toast('No arrows! Buy some in the shop'); return false; }
     e._lastBow = now; e.inv.remove('arrow', 1);
     power = Math.max(.15, Math.min(1, power));
-    spawnProjectile({ id: newId(e), type: 'arrow', owner: e, pos: origin, vel: dir.clone().multiplyScalar(34 + 62 * power), power });
+    spawnProjectile({ id: newId(e), type: 'arrow', owner: e, pos: origin, vel: dir.clone().multiplyScalar(34 + 62 * power), power: power * (e.kit === 'archer' ? 1.25 : 1) });
     sfx.bow(); e.avatar.swing(); return true;
   }
   if (it.type === 'throw') {
@@ -172,8 +173,8 @@ export function useItem(e, slot, origin, dir, power = 1) {
     e.inv.takeFromSlot(slot, 1); e.avatar.swing(); sfx.swing(); return true;
   }
   if (it.type === 'food') {
-    if (e.hp >= 100) { if (e.kind === 'local') toast('You are already at full health'); return false; }
-    e.hp = Math.min(100, e.hp + it.heal); e.inv.takeFromSlot(slot, 1); sfx.eat();
+    if (e.hp >= e.maxHp) { if (e.kind === 'local') toast('You are already at full health'); return false; }
+    e.hp = Math.min(e.maxHp, e.hp + it.heal); e.inv.takeFromSlot(slot, 1); sfx.eat();
     if (e.kind === 'local') popNumber(e.pos, '+' + it.heal, '#6dff86');
     return true;
   }
@@ -256,6 +257,7 @@ export function updateProjectiles(dt) {
       if (hitE || hitB) {
         done = true;
         if (p.type === 'arrow') {
+          if (hitE && p.owner.id === G.local?.id && G.match) G.match.myArrows++;
           if (hitE) dealDamage(hitE, Math.round(5 + 15 * p.power), { ...p.owner, x: m.position.x - p.vel.x * .05, y: m.position.y, z: m.position.z - p.vel.z * .05, source: 'arrow', kb: .35 + .45 * p.power, kbUp: .45 });
           endProj(p);
         } else if (p.type === 'fireball') {

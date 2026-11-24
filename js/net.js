@@ -3,7 +3,7 @@
 import { SUPABASE_URL, SUPABASE_ANON_KEY, TEAM_KEYS } from './config.js';
 import { G } from './state.js';
 
-let sb = null;
+export let sb = null;
 export let online = false;
 try {
   // loaded lazily so Solo mode still works if Supabase can't be reached
@@ -11,7 +11,7 @@ try {
     import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm'),
     new Promise((_, rej) => setTimeout(() => rej(new Error('Supabase load timeout')), 7000)),
   ]);
-  sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { persistSession: false }, realtime: { params: { eventsPerSecond: 60 } } });
+  sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { persistSession: true, autoRefreshToken: true, storageKey: 'fob-auth' }, realtime: { params: { eventsPerSecond: 60 } } });
   online = true;
 } catch (err) { console.error('Supabase init failed', err); }
 
@@ -23,22 +23,24 @@ function presentIds(ch) { try { return Object.keys(ch?.presenceState() || {}); }
 
 // ================= HUB =================
 let hub = null;
-export const hubEvents = { onPos: null, onLeave: null, onChat: null, onCount: null };
+export const hubEvents = { onPos: null, onLeave: null, onChat: null, onCount: null, onInvite: null, onPeople: null };
+let hubMeta = {};
 export async function joinHub() {
   if (!online || hub) return false;
   try {
     const ch = sb.channel('fob-hub-v2', { config: { broadcast: { self: false }, presence: { key: G.myId } } });
     ch.on('broadcast', { event: 'g' }, (m) => {
       const p = m.payload || {}; if (p.from === G.myId) return;
-      if (p.k === 'pos') hubEvents.onPos?.(p.from, p.n, p.d);
+      if (p.k === 'pos') hubEvents.onPos?.(p.from, p.n, p.d, p.l);
       else if (p.k === 'chat') hubEvents.onChat?.(p.n, p.t);
       else if (p.k === 'hello') { lastHubPos = 0; }
+      else if (p.k === 'invite') hubEvents.onInvite?.(p);
     });
     ch.on('presence', { event: 'leave' }, ({ key }) => hubEvents.onLeave?.(key));
-    ch.on('presence', { event: 'sync' }, () => hubEvents.onCount?.(presentIds(ch).length));
+    ch.on('presence', { event: 'sync' }, () => { hubEvents.onCount?.(presentIds(ch).length); hubEvents.onPeople?.(); });
     await new Promise((res, rej) => { const t = setTimeout(() => rej(new Error('timeout')), 10000); ch.subscribe(st => { if (st === 'SUBSCRIBED') { clearTimeout(t); res(); } else if (st === 'CHANNEL_ERROR' || st === 'TIMED_OUT') { clearTimeout(t); rej(new Error(st)); } }); });
     hub = ch;
-    await ch.track({ n: G.name });
+    await ch.track({ n: G.name, ...hubMeta });
     sendOn(hub, 'hello');
     return true;
   } catch (err) { console.warn('Hub connect failed', err); try { if (hub) sb.removeChannel(hub); } catch {} hub = null; return false; }
@@ -49,16 +51,28 @@ export function sendHubPos(e) {
   if (!hub) return; const now = performance.now(); if (now - lastHubPos < 200) return;
   const d = [+e.pos.x.toFixed(1), +e.pos.y.toFixed(1), +e.pos.z.toFixed(1), +e.yaw.toFixed(2)];
   const sig = d.join(','); if (sig === lastHubSig && now - lastHubPos < 2000) return;
-  lastHubSig = sig; lastHubPos = now; sendOn(hub, 'pos', { n: G.name, d });
+  lastHubSig = sig; lastHubPos = now; sendOn(hub, 'pos', { n: G.name, l: hubMeta.lvl || 1, d });
 }
 export function sendHubChat(t) { sendOn(hub, 'chat', { n: G.name, t }); }
+// what other hub players can see about us (level, account id, public party)
+let metaTimer = null;
+export function setHubMeta(m) {
+  Object.assign(hubMeta, m);
+  for (const k of Object.keys(hubMeta)) if (hubMeta[k] == null) delete hubMeta[k];
+  clearTimeout(metaTimer);
+  metaTimer = setTimeout(() => { if (hub) hub.track({ n: G.name, ...hubMeta }).catch?.(() => {}); }, 250);
+}
+export function hubPeople() {
+  try { return Object.entries(hub?.presenceState() || {}).map(([id, arr]) => ({ id, ...(arr[0] || {}) })); } catch { return []; }
+}
+export function sendInvite(toUid, code) { sendOn(hub, 'invite', { to: toUid, code, n: G.name }); }
 
 // ================= PARTY / MATCH =================
 let party = null;               // channel
-export const P = { code: null, isHost: false, hostId: null, players: {}, settings: { mode: 'solos', bots: true, diff: 'normal' }, status: 'none' };
+export const P = { code: null, isHost: false, hostId: null, players: {}, settings: { mode: 'solos', bots: true, diff: 'normal', public: false, quick: false }, status: 'none', me: { kit: 'default', lvl: 1 } };
 export const partyEvents = { onUpdate: null, onStart: null, onClosed: null, onError: null };
 let matchHandler = null, leaveHandler = null, joinTimers = [];
-const LOBBY_KINDS = new Set(['join_req', 'lobby', 'reject', 'closed', 'start', 'team_req', 'pchat']);
+const LOBBY_KINDS = new Set(['join_req', 'lobby', 'reject', 'closed', 'start', 'team_req', 'pchat', 'pinfo']);
 
 export function onMatch(fn) { matchHandler = fn; }
 export function onPresenceLeave(fn) { leaveHandler = fn; }
@@ -88,13 +102,13 @@ async function connectParty(code) {
   return ch;
 }
 
-export async function createParty() {
+export async function createParty(customCode = null, settings = {}) {
   if (!online) throw new Error('offline');
   await leaveParty();
-  const code = code6();
+  const code = customCode || code6();
   party = await connectParty(code);
-  Object.assign(P, { code, isHost: true, hostId: G.myId, players: { [G.myId]: { name: G.name, team: 'blue' } }, status: 'lobby' });
-  P.settings = { mode: 'solos', bots: true, diff: 'normal' };
+  Object.assign(P, { code, isHost: true, hostId: G.myId, players: { [G.myId]: { name: G.name, team: 'blue', kit: P.me.kit, lvl: P.me.lvl } }, status: 'lobby' });
+  P.settings = { mode: 'solos', bots: true, diff: 'normal', public: false, quick: false, ...settings };
   pushLobby();
   return code;
 }
@@ -103,8 +117,8 @@ export async function joinParty(code) {
   await leaveParty();
   party = await connectParty(code);
   Object.assign(P, { code, isHost: false, hostId: null, players: {}, status: 'joining' });
-  sendOn(party, 'join_req', { n: G.name });
-  joinTimers.push(setInterval(() => { if (P.status === 'joining') sendOn(party, 'join_req', { n: G.name }); }, 1200));
+  sendOn(party, 'join_req', { n: G.name, ...P.me });
+  joinTimers.push(setInterval(() => { if (P.status === 'joining') sendOn(party, 'join_req', { n: G.name, ...P.me }); }, 1200));
   return new Promise((resolve, reject) => {
     joinTimers.push(setTimeout(() => { if (P.status === 'joining') { leaveParty(); reject(new Error('notfound')); } }, 7000));
     P._resolveJoin = resolve; P._rejectJoin = reject;
@@ -120,8 +134,21 @@ export async function leaveParty() {
   }
   Object.assign(P, { code: null, isHost: false, hostId: null, players: {}, status: 'none' });
   matchHandler = null;
+  setHubMeta({ pc: null, pn: null, pm: null, pcap: null });
 }
-function pushLobby() { if (!P.isHost) return; sendOn(party, 'lobby', { players: P.players, settings: P.settings }); partyEvents.onUpdate?.(); }
+function pushLobby() {
+  if (!P.isHost) return;
+  sendOn(party, 'lobby', { players: P.players, settings: P.settings }); partyEvents.onUpdate?.();
+  // public parties show up in everyone's Multiplayer menu
+  if (P.settings.public && P.status === 'lobby') setHubMeta({ pc: P.code, pn: Object.keys(P.players).length, pm: P.settings.mode, pcap: teamCap() * 4 });
+  else setHubMeta({ pc: null, pn: null, pm: null, pcap: null });
+}
+export function setMyPartyInfo(me) {
+  Object.assign(P.me, me);
+  if (!P.code) return;
+  if (P.isHost) { if (P.players[G.myId]) Object.assign(P.players[G.myId], me); pushLobby(); }
+  else sendOn(party, 'pinfo', me);
+}
 
 export function requestTeam(team) {
   if (P.isHost) { assignTeam(G.myId, team); return; }
@@ -145,7 +172,7 @@ export function sendPartyChat(t) { sendOn(party, 'pchat', { n: G.name, t }); }
 // Host starts: builds roster (players + bots) and tells everyone.
 export function startPartyMatch() {
   if (!P.isHost) return null;
-  const roster = Object.entries(P.players).map(([id, p]) => ({ id, name: p.name, team: p.team }));
+  const roster = Object.entries(P.players).map(([id, p]) => ({ id, name: p.name, team: p.team, kit: p.kit || 'default', lvl: p.lvl || 1 }));
   if (P.settings.bots) {
     const cap = teamCap(); let i = 0;
     const names = ['Rex', 'Nova', 'Blaze', 'Pixel', 'Turbo', 'Echo', 'Viper', 'Frost'];
@@ -155,7 +182,8 @@ export function startPartyMatch() {
     }
   }
   P.status = 'playing';
-  const msg = { roster, hostId: G.myId };
+  const msg = { roster, hostId: G.myId, kind: P.settings.quick ? 'quick' : 'mp' };
+  setHubMeta({ pc: null, pn: null, pm: null, pcap: null });
   sendOn(party, 'start', msg);
   return msg;
 }
@@ -168,7 +196,7 @@ function onPartyMsg(p) {
       if (P.status !== 'lobby') { sendOn(party, 'reject', { to: p.from, reason: 'started' }); return; }
       if (!P.players[p.from]) {
         const t = freeTeam(); if (!t) { sendOn(party, 'reject', { to: p.from, reason: 'full' }); return; }
-        P.players[p.from] = { name: String(p.n || 'Player').slice(0, 16), team: t };
+        P.players[p.from] = { name: String(p.n || 'Player').slice(0, 16), team: t, kit: String(p.kit || 'default'), lvl: Math.max(1, Math.min(200, +p.lvl || 1)) };
       }
       pushLobby(); return;
     case 'lobby':
@@ -180,6 +208,7 @@ function onPartyMsg(p) {
       if (p.to !== G.myId) return;
       clearJoin(); const r = p.reason; leaveParty(); P._rejectJoin?.(new Error(r)); partyEvents.onError?.(r); return;
     case 'team_req': if (P.isHost) assignTeam(p.from, p.team); return;
+    case 'pinfo': if (P.isHost && P.players[p.from]) { P.players[p.from].kit = String(p.kit || 'default'); P.players[p.from].lvl = Math.max(1, Math.min(200, +p.lvl || 1)); pushLobby(); } return;
     case 'closed': if (p.from === P.hostId && P.status !== 'playing') { leaveParty(); partyEvents.onClosed?.(); } return;
     case 'pchat': partyEvents.onChat?.(p.n, p.t); return;
     case 'start':
@@ -194,3 +223,54 @@ function onPartyLeave(id) {
   if (P.isHost) { if (P.players[id]) { delete P.players[id]; pushLobby(); } }
   else if (id === P.hostId) { leaveParty(); partyEvents.onClosed?.(); }
 }
+
+// ================= QUICK PLAY (matchmaking queue) =================
+// Everyone waiting joins one channel. The player who has waited longest is the matchmaker:
+// once 2+ are waiting it counts down (or goes straight away at 4), picks a party code and
+// tells the group to join it. Empty teams are filled with bots.
+let queue = null, qTimer = null;
+export const Q = { on: false, count: 0, left: 0, deadline: 0 };
+export const queueEvents = { onUpdate: null, onGo: null };
+function qMembers() {
+  try { return Object.entries(queue?.presenceState() || {}).map(([id, a]) => ({ id, ...(a[0] || {}) })).sort((x, y) => (x.t - y.t) || (x.id < y.id ? -1 : 1)); } catch { return []; }
+}
+export async function joinQueue() {
+  if (!online || queue) return;
+  const ch = sb.channel('fob-queue-v1', { config: { broadcast: { self: false }, presence: { key: G.myId } } });
+  ch.on('broadcast', { event: 'g' }, (m) => {
+    const p = m.payload || {}; if (p.from === G.myId) return;
+    if (p.k === 'qgo' && p.ids?.includes(G.myId)) { leaveQueue(); queueEvents.onGo?.({ code: p.code, host: false }); }
+    if (p.k === 'qtick') { Q.left = p.left; queueEvents.onUpdate?.(); }
+  });
+  ch.on('presence', { event: 'sync' }, () => qEval());
+  await new Promise((res, rej) => { const t = setTimeout(() => rej(new Error('timeout')), 10000); ch.subscribe(st => { if (st === 'SUBSCRIBED') { clearTimeout(t); res(); } else if (st === 'CHANNEL_ERROR' || st === 'TIMED_OUT') { clearTimeout(t); rej(new Error(st)); } }); });
+  queue = ch; Q.on = true; Q.deadline = 0; Q.left = 0;
+  await ch.track({ n: G.name, t: Date.now() });
+  qTimer = setInterval(qEval, 1000);
+}
+function qEval() {
+  if (!queue) return;
+  const list = qMembers(); Q.count = list.length;
+  if (list[0]?.id === G.myId && list.length >= 2) {
+    const now = Date.now();
+    if (!Q.deadline) Q.deadline = now + 12000;
+    Q.left = Math.max(0, Math.ceil((Q.deadline - now) / 1000));
+    sendOn(queue, 'qtick', { left: Q.left });
+    if (list.length >= 4 || now >= Q.deadline) {
+      const group = list.slice(0, 4).map(x => x.id);
+      const code = code6();
+      sendOn(queue, 'qgo', { code, ids: group });
+      leaveQueue();
+      queueEvents.onGo?.({ code, host: true, ids: group });
+      return;
+    }
+  } else if (list[0]?.id === G.myId) { Q.deadline = 0; Q.left = 0; }
+  queueEvents.onUpdate?.();
+}
+export async function leaveQueue() {
+  clearInterval(qTimer); qTimer = null;
+  const ch = queue; queue = null; Q.on = false; Q.count = 0; Q.left = 0; Q.deadline = 0;
+  if (ch) { try { await ch.untrack(); } catch {} try { await sb.removeChannel(ch); } catch {} }
+  queueEvents.onUpdate?.();
+}
+export function partySize() { return Object.keys(P.players).length; }

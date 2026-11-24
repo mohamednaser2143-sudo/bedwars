@@ -44,7 +44,7 @@ export class Entity {
     this.pos = this.avatar.group.position;
     this.vel = new THREE.Vector3(); this.kb = new THREE.Vector3();
     this.yaw = 0; this.pitch = 0; this.onGround = false;
-    this.hp = 100; this.dead = false; this.finalDead = false; this.respawnAt = 0;
+    this.hp = 100; this.maxHp = 100; this.kit = 'default'; this.dead = false; this.finalDead = false; this.respawnAt = 0;
     this.armor = 0; this.held = null; this.atkSeq = 0; this.lastSwing = 0;
     this.inv = new Inventory();
     this.lastHurt = 0; this.lastHit = null; this.invulnUntil = 0;

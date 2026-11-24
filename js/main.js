@@ -3,6 +3,8 @@ import { G, loadSettings, saveSettings } from './state.js';
 import { initEngine, updateEnvironment, updateParticles } from './engine.js';
 import { initInput, updateCamera, closeAll } from './player.js';
 import { enterHub, updateHub, openPanel, closePanel } from './hub.js';
+import { authForm } from './menus.js';
+import { A, restoreSession, signOut } from './account.js';
 import { updateMatch, setMatchExit, leaveMatch, matchPresenceLeft } from './match.js';
 import { closeShop, closeUpgrades } from './shop.js';
 import { closeInventory } from './invui.js';
@@ -17,9 +19,8 @@ setMatchExit(() => enterHub());
 net.onPresenceLeave(matchPresenceLeft);
 
 // ---------- buttons ----------
-$('btnSolo').onclick = () => openPanel('solo');
-$('btnMulti').onclick = () => openPanel('multi');
-$('btnSettings').onclick = () => openPanel('settings');
+const btn = { btnSolo: 'solo', btnMulti: 'multi', btnQuick: 'quick', btnKits: 'kits', btnMissions: 'missions', btnProfile: 'profile', btnLeader: 'leader', btnFriends: 'friends', btnSettings: 'settings', btnAdmin: 'admin' };
+for (const [id, panel] of Object.entries(btn)) $(id).onclick = () => openPanel(panel);
 $('panelClose').onclick = () => closePanel();
 $('shopClose').onclick = () => closeShop();
 $('upClose').onclick = () => closeUpgrades();
@@ -29,25 +30,23 @@ $('spectateBtn').onclick = () => hide('deathScreen');
 $('leaveBtn').onclick = () => { if (G.match?.over || confirm('Leave this match and go back to the hub?')) leaveMatch(); };
 for (const id of ['shop', 'upgrades', 'invScreen', 'menuPanel']) $(id).addEventListener('pointerdown', (e) => { if (e.target.id === id) { closeAll(); closePanel(); } });
 
-// ---------- name prompt ----------
+// ---------- start screen ----------
+let started = false;
 function begin() {
   hide('nameModal'); hide('loading');
   enterHub();
-  loop.last = performance.now(); requestAnimationFrame(loop);
+  if (!started) { started = true; loop.last = performance.now(); requestAnimationFrame(loop); }
 }
-function askName() {
-  show('nameModal');
-  const inp = $('nameInput'); inp.value = G.name || ''; inp.focus();
-  const go = () => {
-    const n = inp.value.trim().replace(/\s+/g, ' ').slice(0, 16);
-    if (n.length < 2) { toast('Pick a name with at least 2 characters'); return; }
-    G.name = n; saveSettings(); begin();
-  };
-  $('nameGo').onclick = go;
-  inp.onkeydown = (e) => { if (e.key === 'Enter') go(); };
+async function boot() {
+  // already logged in on this device? jump straight in
+  if (await restoreSession()) {
+    if (A.profile.banned) { await signOut(); hide('loading'); show('bannedModal'); return; }
+    begin(); return;
+  }
+  hide('loading'); show('nameModal');
+  authForm($('authBody'), begin);
 }
-hide('loading');
-if (G.name) begin(); else askName();
+boot();
 
 // ---------- main loop (fixed 60 Hz simulation, render every frame) ----------
 const STEP = 1 / 60;
