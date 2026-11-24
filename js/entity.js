@@ -49,6 +49,7 @@ export class Entity {
     this.inv = new Inventory();
     this.lastHurt = 0; this.lastHit = null; this.invulnUntil = 0;
     this.effects = { speed: 0, jump: 0, slow: 0 };
+    this.balloons = 0; this.balloonGroundT = 0; this.emote = null; this.look = null;
     this.stats = { kills: 0, finals: 0, beds: 0, deaths: 0 };
     this.target = new THREE.Vector3(); this.targetYaw = 0; // remote interpolation
     this.connected = true;

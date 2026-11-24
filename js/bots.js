@@ -125,6 +125,7 @@ function shop(b) {
   if (inv.count('gapple') < 2) buy(entry('gapple'));
   if (ai.diff !== 'easy') { for (const k of ['sharp', 'prot', 'forge', 'haste']) if (tryUpgrade(b, k) === 'ok') bought++; }
   if (ai.diff === 'hard' && inv.count('fireball') < 1) buy(entry('fireball'));
+  if (ai.diff !== 'easy' && inv.count('balloon') < 3 && inv.res.gold >= 10) buy(entry('balloon'));
   ai.shopped = performance.now();
   // equip best sword
   b.held = inv.best('sword');
@@ -141,6 +142,13 @@ function defendList(b) {
 export function updateBot(b, dt) {
   if (!b.alive || !G.match || G.match.over) return;
   const ai = b.ai, D = BOT_DIFF[ai.diff], now = performance.now(), m = G.match;
+  // fell off? pop the balloons (if we have them) and float home
+  if (!b.onGround && b.pos.y < -4 && !b.balloons) { const bi = b.inv.find(s => s.id === 'balloon'); if (bi >= 0) useItem(b, bi, null, null); }
+  if (b.balloons) {
+    const sp = m.spawns[b.team], dx = sp.x - b.pos.x, dz = sp.z - b.pos.z, d = Math.hypot(dx, dz) || 1;
+    const s = speedOf(b) * .7; b.vel.x = dx / d * s; b.vel.z = dz / d * s; b.yaw = Math.atan2(dx, dz);
+    return;
+  }
   if (now >= ai.nextThink) { ai.nextThink = now + D.react * (.7 + Math.random() * .6); think(b); }
   if (updateMining(b, dt)) return;
 

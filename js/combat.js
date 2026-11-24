@@ -5,6 +5,7 @@ import { ITEMS, ARMOR, PROT_MULT, COMBAT, TEAMS, BLOCKS } from './config.js';
 import { getCell, toCell, toCellY, removeCell, cellX, cellY } from './grid.js';
 import { canFit } from './physics.js';
 import { sfx } from './audio.js';
+import { killEffect } from './fx.js';
 import { popNumber, killfeed, teamSpan, toast, bigMessage } from './ui.js';
 
 // ---------- DAMAGE ----------
@@ -65,6 +66,11 @@ export function applyHit(v, raw, src) {
   if (src.source === 'fall') dmg = Math.max(1, Math.round(raw * (v.kit === 'ninja' ? .4 : 1))); // armor doesn't help with falls
   v.hp = Math.max(0, v.hp - dmg); if (dmg > 0) v.lastHurt = now;
   if (src.id !== v.id && src.source !== 'void' && src.source !== 'fall') v.lastHit = { id: src.id, name: src.name, team: src.team, at: now };
+  // arrows pop balloons first
+  if (src.source === 'arrow' && v.balloons > 0) {
+    v.balloons--; sfx.pop(); popNumber(v.pos, '🎈 POP!', '#ff7ad9');
+    if (v.kind === 'local') { G.match.onLocalChanged?.(); if (!v.balloons) toast('All your balloons popped!'); }
+  }
   // combo knockback: each hit from the same attacker in quick succession pushes harder
   if (src.source === 'melee') {
     if (v.comboFrom === src.id && now - v.comboAt < 1300) v.combo = Math.min(5, (v.combo || 1) + 1); else v.combo = 1;
@@ -101,7 +107,7 @@ export function trackFall(e, wasGround) {
 export function killEntity(v, cause) {
   if (v.dead) return;
   const now = performance.now(), m = G.match;
-  v.dead = true; v.hp = 0; v.setVisible(false);
+  v.dead = true; v.hp = 0; v.setVisible(false); v.balloons = 0; v.avatar.setBalloons(0);
   v.vel.set(0, 0, 0); v.kb.set(0, 0, 0);
   const bedAlive = m.beds[v.team]?.alive;
   const final = !bedAlive;
@@ -111,7 +117,6 @@ export function killEntity(v, cause) {
   applyDeathPenalty(v);
   onKillEvent(ev);
   m.send('kill', ev);
-  burst(v.center(), TEAMS[v.team].color, 18, 12);
 }
 
 function applyDeathPenalty(v) {
@@ -135,12 +140,13 @@ export function onKillEvent(ev) {
   else killfeed(`${teamSpan(ev.victimName, vc)} ${how}${tag}`);
   const vs = m.statFor(ev.victim, ev.victimName, ev.victimTeam); if (vs) vs.deaths++;
   if (ev.killer) { const ks = m.statFor(ev.killer, ev.killerName, ev.killerTeam); if (ks) { ks.kills++; if (ev.final) ks.finals++; } }
-  if (ev.killer === G.local?.id) { sfx.kill(); if (ev.final) bigMessage('FINAL KILL', ev.victimName, '#ff5252', 1500); }
+  if (ev.killer === G.local?.id) { sfx.kill(); if (ev.final) bigMessage('FINAL KILL', ev.victimName, '#ff5252', 1500); else toast(`⚔️ You killed ${ev.victimName}`); }
   if (ev.victim === G.local?.id) {
     sfx.death();
     m.onLocalDeath?.(ev);
   }
   const e = G.entities.get(ev.victim);
+  if (e) killEffect(m.looks?.[ev.killer]?.kill || 'kill_default', e.pos, TEAMS[ev.victimTeam]?.color);
   if (e && e.kind === 'remote') { e.dead = true; e.finalDead = ev.final; e.setVisible(false); }
   m.checkElimination?.();
 }
@@ -176,6 +182,14 @@ export function useItem(e, slot, origin, dir, power = 1) {
     if (e.hp >= e.maxHp) { if (e.kind === 'local') toast('You are already at full health'); return false; }
     e.hp = Math.min(e.maxHp, e.hp + it.heal); e.inv.takeFromSlot(slot, 1); sfx.eat();
     if (e.kind === 'local') popNumber(e.pos, '+' + it.heal, '#6dff86');
+    return true;
+  }
+  if (it.type === 'balloon') {
+    if (e.balloons > 0) return false;
+    const n = Math.min(3, e.inv.count('balloon'));
+    e.inv.remove('balloon', n); e.balloons = n; e.balloonGroundT = 0;
+    e.vel.y = Math.max(e.vel.y, -6); e.fallTop = null; sfx.pop();
+    if (e.kind === 'local') toast(n === 3 ? '🎈 Floating up! Steer back to land' : `Only ${n} balloon${n > 1 ? 's' : ''} — you'll sink slowly`);
     return true;
   }
   if (it.type === 'potion') {
@@ -324,4 +338,17 @@ function explode(pos, type, owner) {
     removeCell(c.gx, c.gy, c.gz); removed.push([c.gx, c.gy, c.gz]);
   }
   if (removed.length) G.match?.send?.('blkRm', { c: removed });
+}
+
+// Balloons: 3 lift you up, 2 sink slowly, 1 sinks faster. They detach after you land.
+const BALLOON_VY = [0, -9, -3.8, 6];
+export function balloonLift(e, dt) {
+  if (!e.balloons) return;
+  let target = BALLOON_VY[e.balloons];
+  if (e.balloons === 3 && e.pos.y > 42) target = 0;
+  e.vel.y += (target - e.vel.y) * Math.min(1, dt * 3);
+  e.vel.y += 66 * dt; // cancel the gravity moveEntity is about to add
+  e.fallTop = null;
+  if (e.onGround) { e.balloonGroundT += dt; if (e.balloonGroundT > .6) { e.balloons = 0; sfx.pop(); if (e.kind === 'local') G.match?.onLocalChanged?.(); } }
+  else e.balloonGroundT = 0;
 }

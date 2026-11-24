@@ -53,4 +53,8 @@ export const sfx = {
   alarm: () => { for (let i = 0; i < 3; i++) { tone(880, .12, 'square', .1, 1, i * .25); tone(660, .12, 'square', .1, 1, i * .25 + .12); } },
   win: () => { [523, 659, 784, 1046].forEach((f, i) => tone(f, .3, 'square', .09, 1, i * .14)); },
   pearl: () => tone(300, .3, 'sine', .15, 3),
+  step: () => noise(.05, .05 + Math.random() * .03, 300 + Math.random() * 250, 'lowpass'),
+  jump: () => noise(.06, .06, 700, 'bandpass'),
+  land: (h = 1) => { noise(.12, Math.min(.35, .1 * h), 220, 'lowpass'); },
+  pop: () => { noise(.06, .4, 2500, 'highpass'); tone(900, .06, 'square', .08, .4); },
 };

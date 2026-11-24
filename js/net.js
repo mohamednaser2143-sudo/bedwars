@@ -1,6 +1,6 @@
 // Supabase Realtime networking: hub presence, party lobbies, match messages.
 // No tables needed — only Broadcast + Presence on public channels.
-import { SUPABASE_URL, SUPABASE_ANON_KEY, TEAM_KEYS } from './config.js';
+import { SUPABASE_URL, SUPABASE_ANON_KEY, TEAM_KEYS, MAP_KEYS, COSMETICS, MAPS } from './config.js';
 import { G } from './state.js';
 
 export let sb = null;
@@ -31,7 +31,7 @@ export async function joinHub() {
     const ch = sb.channel('fob-hub-v2', { config: { broadcast: { self: false }, presence: { key: G.myId } } });
     ch.on('broadcast', { event: 'g' }, (m) => {
       const p = m.payload || {}; if (p.from === G.myId) return;
-      if (p.k === 'pos') hubEvents.onPos?.(p.from, p.n, p.d, p.l);
+      if (p.k === 'pos') hubEvents.onPos?.(p.from, p.n, p.d, p.l, p.lk, p.em);
       else if (p.k === 'chat') hubEvents.onChat?.(p.n, p.t);
       else if (p.k === 'hello') { lastHubPos = 0; }
       else if (p.k === 'invite') hubEvents.onInvite?.(p);
@@ -47,11 +47,11 @@ export async function joinHub() {
 }
 export async function leaveHub() { const ch = hub; hub = null; if (ch) { try { await ch.untrack(); } catch {} try { await sb.removeChannel(ch); } catch {} } }
 let lastHubPos = 0, lastHubSig = '';
-export function sendHubPos(e) {
-  if (!hub) return; const now = performance.now(); if (now - lastHubPos < 200) return;
+export function sendHubPos(e, force = false) {
+  if (!hub) return; const now = performance.now(); if (!force && now - lastHubPos < 200) return;
   const d = [+e.pos.x.toFixed(1), +e.pos.y.toFixed(1), +e.pos.z.toFixed(1), +e.yaw.toFixed(2)];
-  const sig = d.join(','); if (sig === lastHubSig && now - lastHubPos < 2000) return;
-  lastHubSig = sig; lastHubPos = now; sendOn(hub, 'pos', { n: G.name, l: hubMeta.lvl || 1, d });
+  const sig = d.join(','); if (!force && sig === lastHubSig && now - lastHubPos < 2000) return;
+  lastHubSig = sig; lastHubPos = now; sendOn(hub, 'pos', { n: G.name, l: hubMeta.lvl || 1, d, lk: hubMeta.lk, em: e.emote ? [e.emote.id, e.emote.seq] : null });
 }
 export function sendHubChat(t) { sendOn(hub, 'chat', { n: G.name, t }); }
 // what other hub players can see about us (level, account id, public party)
@@ -85,6 +85,16 @@ export function authorityId(hostId) {
 }
 export const teamCap = () => P.settings.mode === 'duos' ? 2 : 1;
 
+// what a player tells the party host about themselves (checked so nobody can send junk)
+function cleanInfo(p) {
+  const lk = p.look || {}, ok = (id, kind) => COSMETICS[id]?.kind === kind ? id : undefined;
+  return {
+    kit: String(p.kit || 'default').slice(0, 20), lvl: Math.max(1, Math.min(200, +p.lvl || 1)),
+    look: { skin: ok(lk.skin, 'skin') || 'skin_default', bed: ok(lk.bed, 'bed') || 'bed_default', kill: ok(lk.kill, 'kill') || 'kill_default', name: ok(lk.name, 'name') || 'name_white' },
+    uid: typeof p.uid === 'string' ? p.uid.slice(0, 40) : null, rating: Math.max(0, Math.min(5000, +p.rating || 1000)),
+    vote: MAP_KEYS.includes(p.vote) ? p.vote : null,
+  };
+}
 function code6() { const c = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; let s = ''; for (let i = 0; i < 6; i++) s += c[Math.floor(Math.random() * c.length)]; return s; }
 function freeTeam(skip) {
   const cap = teamCap();
@@ -107,8 +117,8 @@ export async function createParty(customCode = null, settings = {}) {
   await leaveParty();
   const code = customCode || code6();
   party = await connectParty(code);
-  Object.assign(P, { code, isHost: true, hostId: G.myId, players: { [G.myId]: { name: G.name, team: 'blue', kit: P.me.kit, lvl: P.me.lvl } }, status: 'lobby' });
-  P.settings = { mode: 'solos', bots: true, diff: 'normal', public: false, quick: false, ...settings };
+  Object.assign(P, { code, isHost: true, hostId: G.myId, players: { [G.myId]: { name: G.name, team: 'blue', ...cleanInfo(P.me) } }, status: 'lobby' });
+  P.settings = { mode: 'solos', bots: true, diff: 'normal', public: false, quick: false, ranked: false, ...settings };
   pushLobby();
   return code;
 }
@@ -146,7 +156,7 @@ function pushLobby() {
 export function setMyPartyInfo(me) {
   Object.assign(P.me, me);
   if (!P.code) return;
-  if (P.isHost) { if (P.players[G.myId]) Object.assign(P.players[G.myId], me); pushLobby(); }
+  if (P.isHost) { if (P.players[G.myId]) Object.assign(P.players[G.myId], cleanInfo({ ...P.players[G.myId], ...me })); pushLobby(); }
   else sendOn(party, 'pinfo', me);
 }
 
@@ -172,7 +182,7 @@ export function sendPartyChat(t) { sendOn(party, 'pchat', { n: G.name, t }); }
 // Host starts: builds roster (players + bots) and tells everyone.
 export function startPartyMatch() {
   if (!P.isHost) return null;
-  const roster = Object.entries(P.players).map(([id, p]) => ({ id, name: p.name, team: p.team, kit: p.kit || 'default', lvl: p.lvl || 1 }));
+  const roster = Object.entries(P.players).map(([id, p]) => ({ id, name: p.name, team: p.team, kit: p.kit || 'default', lvl: p.lvl || 1, look: p.look, uid: p.uid, rating: p.rating }));
   if (P.settings.bots) {
     const cap = teamCap(); let i = 0;
     const names = ['Rex', 'Nova', 'Blaze', 'Pixel', 'Turbo', 'Echo', 'Viper', 'Frost'];
@@ -182,7 +192,11 @@ export function startPartyMatch() {
     }
   }
   P.status = 'playing';
-  const msg = { roster, hostId: G.myId, kind: P.settings.quick ? 'quick' : 'mp' };
+  // map: most votes wins (ties and no votes = random)
+  const tally = {}; for (const p of Object.values(P.players)) if (p.vote) tally[p.vote] = (tally[p.vote] || 0) + 1;
+  const top = Math.max(0, ...Object.values(tally)), best = Object.keys(tally).filter(k => tally[k] === top);
+  const map = best.length ? best[Math.floor(Math.random() * best.length)] : MAP_KEYS[Math.floor(Math.random() * MAP_KEYS.length)];
+  const msg = { roster, hostId: G.myId, kind: P.settings.ranked ? 'ranked' : P.settings.quick ? 'quick' : 'mp', map, ranked: P.settings.rankedId || null };
   setHubMeta({ pc: null, pn: null, pm: null, pcap: null });
   sendOn(party, 'start', msg);
   return msg;
@@ -196,7 +210,7 @@ function onPartyMsg(p) {
       if (P.status !== 'lobby') { sendOn(party, 'reject', { to: p.from, reason: 'started' }); return; }
       if (!P.players[p.from]) {
         const t = freeTeam(); if (!t) { sendOn(party, 'reject', { to: p.from, reason: 'full' }); return; }
-        P.players[p.from] = { name: String(p.n || 'Player').slice(0, 16), team: t, kit: String(p.kit || 'default'), lvl: Math.max(1, Math.min(200, +p.lvl || 1)) };
+        P.players[p.from] = { name: String(p.n || 'Player').slice(0, 16), team: t, ...cleanInfo(p) };
       }
       pushLobby(); return;
     case 'lobby':
@@ -208,7 +222,7 @@ function onPartyMsg(p) {
       if (p.to !== G.myId) return;
       clearJoin(); const r = p.reason; leaveParty(); P._rejectJoin?.(new Error(r)); partyEvents.onError?.(r); return;
     case 'team_req': if (P.isHost) assignTeam(p.from, p.team); return;
-    case 'pinfo': if (P.isHost && P.players[p.from]) { P.players[p.from].kit = String(p.kit || 'default'); P.players[p.from].lvl = Math.max(1, Math.min(200, +p.lvl || 1)); pushLobby(); } return;
+    case 'pinfo': if (P.isHost && P.players[p.from]) { Object.assign(P.players[p.from], cleanInfo({ ...P.players[p.from], ...p })); pushLobby(); } return;
     case 'closed': if (p.from === P.hostId && P.status !== 'playing') { leaveParty(); partyEvents.onClosed?.(); } return;
     case 'pchat': partyEvents.onChat?.(p.n, p.t); return;
     case 'start':
@@ -229,17 +243,18 @@ function onPartyLeave(id) {
 // once 2+ are waiting it counts down (or goes straight away at 4), picks a party code and
 // tells the group to join it. Empty teams are filled with bots.
 let queue = null, qTimer = null;
-export const Q = { on: false, count: 0, left: 0, deadline: 0 };
+export const Q = { on: false, count: 0, left: 0, deadline: 0, ranked: false };
 export const queueEvents = { onUpdate: null, onGo: null };
 function qMembers() {
   try { return Object.entries(queue?.presenceState() || {}).map(([id, a]) => ({ id, ...(a[0] || {}) })).sort((x, y) => (x.t - y.t) || (x.id < y.id ? -1 : 1)); } catch { return []; }
 }
-export async function joinQueue() {
+export async function joinQueue(ranked = false) {
   if (!online || queue) return;
-  const ch = sb.channel('fob-queue-v1', { config: { broadcast: { self: false }, presence: { key: G.myId } } });
+  Q.ranked = ranked;
+  const ch = sb.channel(ranked ? 'fob-queue-ranked-v1' : 'fob-queue-v1', { config: { broadcast: { self: false }, presence: { key: G.myId } } });
   ch.on('broadcast', { event: 'g' }, (m) => {
     const p = m.payload || {}; if (p.from === G.myId) return;
-    if (p.k === 'qgo' && p.ids?.includes(G.myId)) { leaveQueue(); queueEvents.onGo?.({ code: p.code, host: false }); }
+    if (p.k === 'qgo' && p.ids?.includes(G.myId)) { const r = Q.ranked; leaveQueue(); queueEvents.onGo?.({ code: p.code, host: false, ranked: r }); }
     if (p.k === 'qtick') { Q.left = p.left; queueEvents.onUpdate?.(); }
   });
   ch.on('presence', { event: 'sync' }, () => qEval());
@@ -253,15 +268,15 @@ function qEval() {
   const list = qMembers(); Q.count = list.length;
   if (list[0]?.id === G.myId && list.length >= 2) {
     const now = Date.now();
-    if (!Q.deadline) Q.deadline = now + 12000;
+    if (!Q.deadline) Q.deadline = now + (Q.ranked ? 15000 : 12000);
     Q.left = Math.max(0, Math.ceil((Q.deadline - now) / 1000));
     sendOn(queue, 'qtick', { left: Q.left });
     if (list.length >= 4 || now >= Q.deadline) {
       const group = list.slice(0, 4).map(x => x.id);
       const code = code6();
       sendOn(queue, 'qgo', { code, ids: group });
-      leaveQueue();
-      queueEvents.onGo?.({ code, host: true, ids: group });
+      const r = Q.ranked; leaveQueue();
+      queueEvents.onGo?.({ code, host: true, ids: group, ranked: r });
       return;
     }
   } else if (list[0]?.id === G.myId) { Q.deadline = 0; Q.left = 0; }

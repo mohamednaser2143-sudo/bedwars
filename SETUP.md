@@ -1,4 +1,12 @@
-# Setup guide — Fight On A Baseplate v3
+# Setup guide — Fight On A Baseplate v4
+
+## Updating from v3? Just do this:
+1. Upload all the files from the zip to GitHub (replace the old ones). There's a new file: `js/fx.js`.
+2. Supabase → **SQL Editor** → **New query**, paste **all** of the new `supabase/setup.sql`, and click **Run**.
+   It adds cosmetics and ranked and keeps everyone's accounts, coins and kits.
+That's it. Skip the steps below unless you're setting up from scratch.
+
+---
 
 Your Supabase keys (project `peztvgqqsffcztdfqchx`) are already in `js/config.js`. Only these steps are left.
 
@@ -35,14 +43,13 @@ Replace the old files when GitHub asks. Then open your GitHub Pages link.
 ## How progress works
 - **XP comes from playing, not winning.** You get XP for time played, kills, final kills, beds broken, blocks placed and arrows hit.
 - **Multipliers:** Easy bots ×0.5, Normal ×1, Hard ×1.6, and multiplayer/Quick Play ×1.3.
-- **Coins** are about 60% of your XP, plus a small bonus for winning. Spend them on **kits** (🎒 button).
-- Some kits also need a **minimum level**.
+- **Coins** are about 60% of your XP, plus a small bonus for winning. Spend them on **kits** (🎒 button). Kits only cost coins, with no level needed.
 - **Missions:** 3 daily (reset at midnight UTC) and 3 weekly (reset every Monday, UTC). They update after every match of 45 seconds or longer. Claim the rewards in 📜 Missions.
 - **Guests** can play everything, but nothing is saved.
 - All the rules live in the database, not in the browser, so players can't just edit their coins. Match results are checked too (caps on kills per minute, no more playtime than real time has passed, one match every 30 seconds).
 
 ## Changing prices or adding kits/missions
-- **Kit prices and levels** are in two places that must match: `js/config.js` (the `KITS` list) and the `insert into public.kits` part of `setup.sql`. Edit both, upload, and re-run the SQL.
+- **Kit prices** are in two places that must match: `js/config.js` (the `KITS` list) and the `insert into public.kits` part of `setup.sql`. Edit both, upload, and re-run the SQL.
 - **Missions:** edit the `insert into public.missions` list in `setup.sql` and re-run it.
 
 ## If something goes wrong

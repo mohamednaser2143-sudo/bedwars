@@ -237,3 +237,28 @@ tr.me td{background:#ffffff10;font-weight:800}
 .toast.invite{pointer-events:auto;background:#1c2f52f0;border:1px solid #58a6ff}
 #toasts{pointer-events:none}#toasts .invite{pointer-events:auto}
 @media(max-width:700px){.statGrid{grid-template-columns:1fr 1fr}.twoCol{grid-template-columns:1fr}.hubSide{top:auto;bottom:90px;transform:none;flex-direction:row;right:50%;transform:translateX(50%)}.sideBtn{width:46px;height:46px}.sideBtn span{display:none}}
+
+#killedBy{font-size:22px;font-weight:800;margin:6px 0 4px;text-shadow:0 2px 4px #000}
+
+/* v4 */
+#minimap{position:fixed;right:14px;top:56px;z-index:30;width:170px;height:170px;border-radius:50%;box-shadow:0 4px 18px #0007}
+#killfeed{top:236px}
+#specHint{position:fixed;left:50%;bottom:120px;transform:translateX(-50%);z-index:36;display:none;padding:8px 14px;border-radius:9px;background:#000b;font-weight:800;font-size:13px;pointer-events:none}
+#loadTip{color:#cfe0f2;max-width:520px;text-align:center;margin:4px 20px}
+#emoteWheel{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:60;display:none;grid-template-columns:repeat(4,96px);gap:8px;padding:14px;border-radius:16px;background:#08111ef0;border:1px solid #ffffff22}
+.ewT{grid-column:1/-1;text-align:center;font:800 11px monospace;color:#9fc3e6}
+#emoteWheel button{position:relative;height:84px;border:1px solid #33506f;border-radius:12px;background:#0d1a2b;color:#fff;font-size:30px;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center}
+#emoteWheel button:hover{background:#1e6fd6}
+#emoteWheel small{font-size:11px;font-weight:800}
+#emoteWheel .k{position:absolute;left:6px;top:4px;font:800 10px monospace;color:#aaa}
+#endScreen.podium{background:transparent;backdrop-filter:none;justify-content:flex-end;padding-right:3vw}
+#endScreen.podium .panel{width:min(460px,92vw)}
+.rankRes{font-size:22px;font-weight:900;display:flex;gap:10px;justify-content:center;align-items:center}
+.rankBadge{font:900 12px monospace}
+.mapPick{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px}
+.mapPick button{padding:10px;border-radius:10px;border:1px solid #33506f;background:#0d1a2b;color:#fff;cursor:pointer;font-weight:800;text-align:left}
+.mapPick button.on{background:#1e6fd6;border-color:#58a6ff}
+.mapPick button span{display:block;font-size:24px}
+.mapPick small{color:#9fc3e6}
+.lockerPrev{font-size:40px}
+.bigBtn.ranked,.hubBtn.ranked{background:linear-gradient(135deg,#d4a017,#ffd34e);color:#2a1a00}

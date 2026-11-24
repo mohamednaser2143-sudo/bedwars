@@ -11,6 +11,7 @@ import { closeInventory } from './invui.js';
 import { $, show, hide, toast } from './ui.js';
 import * as net from './net.js';
 import { allCells, updateBlockAnims } from './grid.js';
+import { updateFx } from './fx.js';
 
 loadSettings();
 initEngine();
@@ -19,7 +20,7 @@ setMatchExit(() => enterHub());
 net.onPresenceLeave(matchPresenceLeft);
 
 // ---------- buttons ----------
-const btn = { btnSolo: 'solo', btnMulti: 'multi', btnQuick: 'quick', btnKits: 'kits', btnMissions: 'missions', btnProfile: 'profile', btnLeader: 'leader', btnFriends: 'friends', btnSettings: 'settings', btnAdmin: 'admin' };
+const btn = { btnSolo: 'solo', btnMulti: 'multi', btnQuick: 'quick', btnRanked: 'ranked', btnKits: 'kits', btnLocker: 'locker', btnMissions: 'missions', btnProfile: 'profile', btnLeader: 'leader', btnFriends: 'friends', btnSettings: 'settings', btnAdmin: 'admin' };
 for (const [id, panel] of Object.entries(btn)) $(id).onclick = () => openPanel(panel);
 $('panelClose').onclick = () => closePanel();
 $('shopClose').onclick = () => closeShop();
@@ -66,6 +67,7 @@ function loop(t) {
   updateEnvironment(dt);
   updateParticles(dt);
   updateBlockAnims(dt);
+  updateFx(dt);
   G.renderer.render(G.scene, G.camera);
 }
 

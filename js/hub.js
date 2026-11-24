@@ -1,13 +1,13 @@
 // The hub lobby: a 3D plaza where everyone online spawns, walks around and picks a mode.
-import { THREE, disposeGroup, mat, box } from './engine.js';
+import { THREE, disposeGroup, mat, box, applyTheme } from './engine.js';
 import { G } from './state.js';
-import { TEAMS, TEAM_KEYS, PHYS, VERSION, KITS } from './config.js';
+import { TEAMS, TEAM_KEYS, PHYS, VERSION, KITS, MAPS, rankOf } from './config.js';
 import { clearGrid } from './grid.js';
 import { buildHubMap } from './maps.js';
 import { Entity } from './entity.js';
 import { updateLocalMovement, setPlayerHooks, setNpcHook, closeAll } from './player.js';
 import { $, show, hide, toast, esc, chatLine, setChatHandler, canChat } from './ui.js';
-import { A, levelProgress, myKit, myLevel, leaderboard, isAdmin } from './account.js';
+import { A, levelProgress, myKit, myLevel, leaderboard, isAdmin, myLook, myRating } from './account.js';
 import { openPanel, closePanel, setMenuHooks, inviteToast } from './menus.js';
 import * as net from './net.js';
 
@@ -20,11 +20,14 @@ export function enterHub() {
   if (G.world) { G.scene.remove(G.world); disposeGroup(G.world); }
   G.world = new THREE.Group(); G.scene.add(G.world);
   G.entities.clear(); clearGrid();
+  applyTheme(MAPS.classic.theme);
   const info = buildHubMap();
   hub = { info, inPortal: null, remotes: new Map(), board: makeBoard() };
   const e = new Entity({ id: G.myId, name: G.name, team: hubColor(G.name), kind: 'local' });
   e.pos.set(info.spawn.x, info.spawn.y, info.spawn.z); e.yaw = info.spawn.yaw;
   e.addToWorld(); G.local = e;
+  e.avatar.setLook(myLook());
+  G.onEmote = () => net.sendHubPos(G.local, true);
   G.cam.yaw = info.spawn.yaw - Math.PI; G.cam.pitch = -.18; G.cam.dist = 15; G.cam.first = false;
   hide('matchHud'); hide('hotbarWrap'); hide('endScreen'); hide('deathScreen');
   show('hubHud', 'block');
@@ -38,8 +41,9 @@ export function enterHub() {
   net.hubEvents.onCount = (c) => { $('hubOnline').textContent = c + ' online'; };
   net.hubEvents.onInvite = (p) => { if (A.user && p.to === A.user.id) inviteToast(p.n, p.code); };
   net.partyEvents.onChat = (n, t) => chatLine('[Party] ' + n, t, '#8feaff');
-  net.setHubMeta({ uid: A.user?.id || null, lvl: myLevel() });
-  net.setMyPartyInfo({ kit: myKit(), lvl: myLevel() });
+  const lk = myLook();
+  net.setHubMeta({ uid: A.user?.id || null, lvl: myLevel(), lk: [lk.skin, lk.name] });
+  net.setMyPartyInfo({ kit: myKit(), lvl: myLevel(), look: lk, uid: A.user?.id || null, rating: myRating() });
   net.joinHub().then(ok => setNetStatus(ok));
   refreshBoard();
   if (net.P.code && net.P.status === 'lobby') openPanel('party');
@@ -52,11 +56,13 @@ export function renderAccountCard() {
     $('hubLevel').innerHTML = `<span class="lvlBadge guest">GUEST</span> <span class="muted small">Progress isn't saved</span> <button class="miniBtn" id="guestSignIn">Sign in / Sign up</button>`;
     $('guestSignIn').onclick = () => openPanel('account');
   } else {
-    const p = A.profile;
-    $('hubLevel').innerHTML = `<span class="lvlBadge">LV ${lp.level}</span><div class="xpBar small"><div style="width:${lp.into / lp.need * 100}%"></div></div><span class="small">${lp.into}/${lp.need} XP</span> <span class="coins">🪙 ${p.coins}</span> <span class="small muted">${KITS[p.kit]?.icon || ''} ${KITS[p.kit]?.name || ''}</span>`;
+    const p = A.profile, rk = rankOf(p.rating ?? 1000);
+    $('hubLevel').innerHTML = `<span class="lvlBadge">LV ${lp.level}</span><span class="rankBadge" style="color:${rk.color}" title="Ranked rating">${rk.icon} ${rk.name} ${p.rating ?? 1000}</span><div class="xpBar small"><div style="width:${lp.into / lp.need * 100}%"></div></div><span class="small">${lp.into}/${lp.need} XP</span> <span class="coins">🪙 ${p.coins}</span> <span class="small muted">${KITS[p.kit]?.icon || ''} ${KITS[p.kit]?.name || ''}</span>`;
   }
   $('btnAdmin').style.display = isAdmin() ? 'inline-flex' : 'none';
-  net.setHubMeta({ lvl: myLevel() });
+  const lk = myLook(); net.setHubMeta({ lvl: myLevel(), lk: [lk.skin, lk.name] });
+  G.local?.avatar.setLook(lk);
+  net.setMyPartyInfo({ look: lk, kit: myKit(), lvl: myLevel(), rating: myRating() });
 }
 
 function setNetStatus(ok) {
@@ -66,7 +72,7 @@ function setNetStatus(ok) {
   else { el.textContent = '● ONLINE'; el.className = 'net on'; }
 }
 
-function onHubPos(id, name, d, lvl) {
+function onHubPos(id, name, d, lvl, lk, em) {
   if (G.mode !== 'hub') return;
   let r = hub.remotes.get(id);
   if (!r) {
@@ -74,6 +80,8 @@ function onHubPos(id, name, d, lvl) {
     r.avatar.setName(`[${lvl || 1}] ${name || 'Player'}`, r.team);
     r.pos.set(d[0], d[1], d[2]); r.addToWorld(); hub.remotes.set(id, r);
   }
+  if (lk) r.avatar.setLook({ skin: lk[0], name: lk[1] });
+  if (em && em[1] !== r.emoteSeqSeen) { r.emoteSeqSeen = em[1]; r.avatar.playEmote(em[0]); }
   r.target.set(d[0], d[1], d[2]); r.targetYaw = d[3];
 }
 function onHubLeave(id) { const r = hub?.remotes.get(id); if (r) { r.removeFromWorld(); hub.remotes.delete(id); } }

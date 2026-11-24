@@ -12,7 +12,10 @@
 </head>
 <body>
 
-<div id="loading"><div class="spin"></div><b>Loading Fight On A Baseplate…</b><small>If this never goes away, your network may be blocking cdn.jsdelivr.net</small></div>
+<div id="loading"><div class="spin"></div><b>Loading Fight On A Baseplate…</b><p id="loadTip"></p><small>If this never goes away, your network may be blocking cdn.jsdelivr.net</small></div>
+<script>
+(function(){var t=['Crouch (Shift) to stop yourself falling off edges.','Hold the mouse to charge your bow for 4x damage.','Balloons only lift you with all 3 — archers can pop them!','Layer your bed defence: wool, then wood, then stone.','Diamond and emerald generators speed up at 5 and 10 minutes.','Sudden Death destroys every bed at 15:00.','Shears break wool almost instantly.','Press X to open the emote wheel.','Hard bots give 1.6x XP.','Climb from Bronze to Diamond in Ranked!'],i=Math.floor(Math.random()*t.length),e=document.getElementById('loadTip');function s(){e.textContent='💡 '+t[i++%t.length]}s();var h=setInterval(function(){if(!document.getElementById('loading')||document.getElementById('loading').style.display==='none')return clearInterval(h);s()},2600)})();
+</script>
 
 <!-- start screen: log in / sign up / guest -->
 <div id="nameModal" class="modal">
@@ -35,6 +38,7 @@
 <div id="killfeed"></div>
 <div id="chat"><div id="chatLog"></div><input id="chatInput" maxlength="120" placeholder="Say something… (Enter to send, Esc to cancel)" autocomplete="off"></div>
 <div id="hint"></div>
+<div id="emoteWheel"></div>
 <div id="mineBar"><div></div></div><div id="mineText"></div>
 
 <!-- HUB HUD -->
@@ -48,6 +52,7 @@
   </div>
   <div class="hubSide">
     <button class="sideBtn" id="btnKits">🎒<span>Kits</span></button>
+    <button class="sideBtn" id="btnLocker">🎨<span>Locker</span></button>
     <button class="sideBtn" id="btnMissions">📜<span>Missions</span></button>
     <button class="sideBtn" id="btnProfile">👤<span>Profile</span></button>
     <button class="sideBtn" id="btnLeader">🏆<span>Leaders</span></button>
@@ -58,9 +63,10 @@
   <div class="hubButtons">
     <button class="hubBtn solo" id="btnSolo">🤖 SOLO VS BOTS</button>
     <button class="hubBtn quick" id="btnQuick">⚡ QUICK PLAY</button>
+    <button class="hubBtn ranked" id="btnRanked">🏅 RANKED</button>
     <button class="hubBtn multi" id="btnMulti">🌐 PARTY</button>
   </div>
-  <div class="hubTip">Walk into a portal or use the buttons • Click the screen to look around • T to chat</div>
+  <div class="hubTip">Walk into a portal or use the buttons • Click the screen to look around • T chat • X emotes</div>
 </div>
 
 <div id="menuPanel" class="modal">
@@ -81,6 +87,8 @@
   <div id="teamsBar"></div>
   <div id="timer"></div>
   <button id="leaveBtn" title="Leave match">⏏ Leave</button>
+  <canvas id="minimap" width="170" height="170"></canvas>
+  <div id="specHint">👁️ SPECTATING — click to follow a player • right click for free camera • WASD / Space / Shift to fly</div>
   <div id="scoreboard"></div>
 </div>
 <div id="hotbarWrap"><div id="heldLabel"></div><div id="hotbar"></div><div class="hbHelp">1-9 select • E inventory • F shop • Click attack/use • Hold to mine / draw bow • Right click place • Shift crouch</div></div>
@@ -113,13 +121,14 @@
 </div>
 
 <div id="deathScreen" class="modal dim">
-  <div class="center"><h1 id="deathTitle">YOU DIED</h1><p id="deathText"></p><button class="btn" id="spectateBtn">Spectate</button></div>
+  <div class="center"><h1 id="deathTitle">YOU DIED</h1><div id="killedBy"></div><p id="deathText"></p><button class="btn" id="spectateBtn">Spectate</button></div>
 </div>
 
 <div id="endScreen" class="modal">
   <div class="panel">
     <h1 id="endTitle">VICTORY!</h1>
     <p id="endSub"></p>
+    <div id="endRank"></div>
     <div id="endRewards"></div>
     <div id="endStats"></div>
     <button class="bigBtn" id="endBack">BACK TO LOBBY</button>

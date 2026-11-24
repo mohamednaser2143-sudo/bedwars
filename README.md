@@ -1,6 +1,16 @@
-# Fight On A Baseplate — BedWars (v3)
+# Fight On A Baseplate — BedWars (v4)
 
 **First time? Read `SETUP.md`.** It covers turning off email confirmation, running the database script, and making yourself admin.
+
+## New in v4
+- **Locker (🎨):** hats and outfits, bed designs, kill effects, name colours and emotes, all bought with coins.
+- **Emotes:** press **X** for the emote wheel. Other players can see your emotes in the lobby and in matches.
+- **4 maps:** Classic Islands, Frostbite (snow), Desert Ruins and Nether (lava). In a party everyone votes; in Solo you pick one or go random.
+- **New items:** Shears (wool breaks about 7× faster), Axe (wood breaks 3.5× faster), Balloons (pack of 3), and Sharpened Swords II and III.
+- **Balloons:** use them while falling. 3 balloons float you up, 2 make you sink slowly, 1 sinks faster. Every arrow that hits you pops one.
+- **Ranked (🏅):** real players only, Elo rating, ranks from Bronze to Diamond, plus a rating leaderboard.
+- **Polish:** mini-map, footsteps and landing sounds, loading and match tips, spectator camera after you're eliminated, and an MVP podium at the end.
+- The death screen says **"Killed by (username)"**, or "Shot by", "Knocked into the void by" and so on.
 
 ## New in v3
 - **Accounts** (username + password, no email needed). Your levels, XP, coins, kits, stats and missions are saved, and you stay logged in on your device.
@@ -52,7 +62,8 @@ js/match.js       match flow, generators, respawns, win screen, multiplayer sync
 js/hub.js         hub lobby, menus, party screen, settings
 js/net.js         Supabase Realtime (hub presence, parties, Quick Play, invites)
 js/account.js     accounts, profile, XP/coins, kits, missions, friends, admin calls
-js/menus.js       all lobby menus (play, party, kits, missions, profile, leaderboards, friends, settings, admin)
+js/fx.js          kill effects
+js/menus.js       all lobby menus (incl. Locker, Ranked, map voting) (play, party, kits, missions, profile, leaderboards, friends, settings, admin)
 supabase/setup.sql  the database: tables, security rules, and all the server-side rules
 js/ui.js, js/audio.js   small helpers
 ```

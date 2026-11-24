@@ -1,7 +1,7 @@
 // Every menu panel in the hub: play modes, party, quick play, kits, missions, profile,
 // leaderboards, friends, settings, account and the admin panel.
 import { G, saveSettings } from './state.js';
-import { TEAMS, TEAM_KEYS, BOT_DIFF, BOT_NAMES, KITS, levelNeed } from './config.js';
+import { TEAMS, TEAM_KEYS, BOT_DIFF, BOT_NAMES, KITS, levelNeed, COSMETICS, MAPS, MAP_KEYS, RANKS, rankOf } from './config.js';
 import { startMatch } from './match.js';
 import { $, show, hide, toast, esc } from './ui.js';
 import { sfx, setVolume } from './audio.js';
@@ -10,17 +10,18 @@ import {
   A, signIn, signUp, signOut, playAsGuest, validName, levelProgress, myKit, myLevel, ownsKit, buyKit, setKit,
   getMissions, claimMission, leaderboard, history, myFriends, addFriend, respondFriend, removeFriend,
   isAdmin, adminFind, adminSetPassword, adminUpdate, refreshProfile,
+  ownsCosmetic, buyCosmetic, equipCosmetic, myLook, myRating, rankedStart,
 } from './account.js';
 
 let hooks = { reenter: null, refreshCard: null, refreshBoard: null };
 export function setMenuHooks(h) {
   Object.assign(hooks, h);
   // these must work even when no panel is open
-  net.partyEvents.onStart = (msg) => { closePanel(); net.leaveHub(); startMatch({ online: true, hostId: msg.hostId, roster: msg.roster, kind: msg.kind || 'mp' }); };
+  net.partyEvents.onStart = (msg) => { closePanel(); net.leaveHub(); startMatch({ online: true, hostId: msg.hostId, roster: msg.roster, kind: msg.kind || 'mp', map: msg.map, ranked: msg.ranked }); };
   net.partyEvents.onClosed = () => { toast('The party was closed'); if (G.uiOpen === 'panel' && current === 'party') openPanel('multi'); };
   net.partyEvents.onError = (r) => toast(r === 'full' ? 'Party is full' : 'That match already started');
   net.queueEvents.onGo = onQuickGo;
-  net.queueEvents.onUpdate = () => { if (current === 'quick' && G.uiOpen === 'panel') renderQuick(); };
+  net.queueEvents.onUpdate = () => {};
 }
 
 let current = null;
@@ -36,16 +37,17 @@ export function openPanel(which) {
   G.uiOpen = 'panel'; current = which; if (document.pointerLockElement) document.exitPointerLock();
   show('menuPanel'); sfx.click();
   body().onclick = null;
-  const map = { solo: renderSolo, multi: renderMulti, party: renderParty, quick: renderQuick, kits: renderKits, missions: renderMissions, profile: renderProfile, leader: renderLeader, friends: renderFriends, settings: renderSettings, account: renderAccount, admin: renderAdmin };
+  const map = { solo: renderSolo, multi: renderMulti, party: renderParty, quick: () => renderQuick(false), ranked: () => renderQuick(true), locker: renderLocker, kits: renderKits, missions: renderMissions, profile: renderProfile, leader: renderLeader, friends: renderFriends, settings: renderSettings, account: renderAccount, admin: renderAdmin };
   (map[which] || renderMulti)();
 }
 export function closePanel() {
-  if (current === 'quick' && net.Q.on) net.leaveQueue();
+  if ((current === 'quick' || current === 'ranked') && net.Q.on) net.leaveQueue();
   hide('menuPanel'); if (G.uiOpen === 'panel') G.uiOpen = null; current = null; net.partyEvents.onUpdate = null;
 }
 
 // ================= SOLO =================
-let soloCfg = { diff: 'normal', layout: '4' };
+let soloCfg = { diff: 'normal', layout: '4', map: 'random' };
+const mapPicker = (id, cur, votes = null) => `<div class="mapPick" id="${id}">${[['random', '🎲', 'Random'], ...MAP_KEYS.map(k => [k, MAPS[k].icon, MAPS[k].name])].map(([k, ic, n]) => `<button data-v="${k}" class="${cur === k ? 'on' : ''}"><span>${ic}</span>${n}${votes ? `<small> • ${votes[k] || 0} vote${votes[k] === 1 ? '' : 's'}</small>` : ''}</button>`).join('')}</div>`;
 function renderSolo() {
   title('🤖 Solo vs Bots');
   const mult = { easy: '×0.5', normal: '×1', hard: '×1.6' };
@@ -55,21 +57,23 @@ function renderSolo() {
     ${seg('segDiff', Object.entries(BOT_DIFF).map(([k, d]) => [k, `${d.label} <small>${mult[k]} XP</small>`]), soloCfg.diff)}
     <div class="lbl">MATCH TYPE</div>
     ${seg('segLayout', [['2', '1v1 (2 teams)'], ['4', 'Solos (4 teams)'], ['d', 'Duos (bot teammate)']], soloCfg.layout)}
+    <div class="lbl">MAP</div>${mapPicker('soloMap', soloCfg.map)}
     <div class="lbl">YOUR KIT</div>${kitPicker()}
     <button class="bigBtn" id="soloStart">▶ START MATCH</button>`;
   onSeg('segDiff', v => { soloCfg.diff = v; renderSolo(); });
   onSeg('segLayout', v => { soloCfg.layout = v; renderSolo(); });
+  body().querySelector('#soloMap').onclick = (e) => { const b = e.target.closest('button'); if (b) { soloCfg.map = b.dataset.v; sfx.click(); renderSolo(); } };
   wireKitPicker(renderSolo);
   body().querySelector('#soloStart').onclick = startSolo;
 }
 function startSolo() {
-  const roster = [{ id: G.myId, name: G.name, team: 'blue', kit: myKit(), lvl: myLevel() }]; let n = 0;
+  const roster = [{ id: G.myId, name: G.name, team: 'blue', kit: myKit(), lvl: myLevel(), look: myLook() }]; let n = 0;
   const pick = () => BOT_NAMES[(n++ + Math.floor(Math.random() * 16)) % BOT_NAMES.length] + ' (Bot)';
   const teams = soloCfg.layout === '2' ? ['blue', 'red'] : TEAM_KEYS;
   const per = soloCfg.layout === 'd' ? 2 : 1;
   for (const t of teams) for (let k = t === 'blue' ? 1 : 0; k < per; k++) roster.push({ id: `bot_${t}_${k}`, name: pick(), team: t, bot: true, diff: soloCfg.diff });
   closePanel(); net.leaveHub();
-  startMatch({ online: false, roster, kind: 'solo', diff: soloCfg.diff });
+  startMatch({ online: false, roster, kind: 'solo', diff: soloCfg.diff, map: soloCfg.map === 'random' ? null : soloCfg.map });
 }
 
 // small kit chooser used by the solo + party screens
@@ -94,6 +98,7 @@ function renderMulti() {
   const pubs = net.hubPeople().filter(p => p.pc);
   body().innerHTML = `
     <button class="bigBtn quick" id="mpQuick">⚡ QUICK PLAY <small>— get matched with other players</small></button>
+    <button class="bigBtn ranked" id="mpRanked">🏅 RANKED <small>— real players only, win to climb</small></button>
     <div class="twoCol">
       <div><div class="lbl">MAKE A PARTY</div><button class="btn wide" id="mpCreate">＋ CREATE PARTY</button></div>
       <div><div class="lbl">JOIN WITH CODE</div><div class="row"><input id="mpCode" maxlength="6" placeholder="ABC123" autocomplete="off"><button class="btn" id="mpJoin">JOIN</button></div></div>
@@ -105,6 +110,7 @@ function renderMulti() {
   code.oninput = () => { code.value = code.value.toUpperCase().replace(/[^A-Z0-9]/g, ''); };
   code.onkeydown = (ev) => { if (ev.key === 'Enter') b.querySelector('#mpJoin').click(); };
   b.querySelector('#mpQuick').onclick = () => openPanel('quick');
+  b.querySelector('#mpRanked').onclick = () => { if (A.guest) { toast('Ranked needs an account'); openPanel('account'); } else openPanel('ranked'); };
   b.querySelector('#mpCreate').onclick = async () => {
     $('mpStatus').textContent = 'Creating party...';
     try { await net.createParty(); openPanel('party'); toast('Party created — share the code!', 'good'); }
@@ -147,6 +153,7 @@ function renderParty() {
       <div class="codeRow"><span>PARTY CODE</span><b id="pcode">${P.code}</b><button class="btn" id="pcopy">COPY</button>${!A.guest ? '<button class="btn" id="pinv">INVITE FRIENDS</button>' : ''}</div>
       <div class="pteams">${teams}</div>
       <div class="lbl">YOUR KIT</div>${kitPicker()}
+      <div class="lbl">VOTE FOR A MAP</div>${mapPicker('pMap', P.players[G.myId]?.vote || '', voteCount())}
       ${P.isHost ? `
       <div class="lbl">MODE</div>${seg('pMode', [['solos', 'Solos (1 per team)'], ['duos', 'Duos (2 per team)']], S.mode)}
       <div class="lbl">EMPTY SLOTS</div>${seg('pBots', [['1', 'Fill with bots'], ['0', 'Leave empty']], S.bots ? '1' : '0')}
@@ -161,6 +168,7 @@ function renderParty() {
   b.querySelector('.pteams').onclick = (ev) => { const t = ev.target.closest('.pteam'); if (t) { net.requestTeam(t.dataset.t); sfx.click(); } };
   b.querySelector('#pLeave').onclick = async () => { await net.leaveParty(); openPanel('multi'); };
   wireKitPicker(renderParty);
+  b.querySelector('#pMap').onclick = (e) => { const x = e.target.closest('button'); if (!x) return; sfx.click(); net.setMyPartyInfo({ vote: x.dataset.v === 'random' ? null : x.dataset.v }); if (!P.isHost) { P.players[G.myId] && (P.players[G.myId].vote = x.dataset.v); renderParty(); } };
   if (P.isHost) {
     onSeg('pMode', v => net.setSettings({ mode: v }));
     onSeg('pBots', v => net.setSettings({ bots: v === '1' }));
@@ -169,45 +177,55 @@ function renderParty() {
     b.querySelector('#pStart').onclick = hostStart;
   }
 }
+function voteCount() { const v = {}; for (const p of Object.values(net.P.players)) if (p.vote) v[p.vote] = (v[p.vote] || 0) + 1; return v; }
 function hostStart() {
   const P = net.P, S = P.settings;
   const teamsUsed = new Set(Object.values(P.players).map(p => p.team));
   if (!S.bots && teamsUsed.size < 2) { toast('Need players on at least 2 teams (or turn on bots)'); return; }
   const msg = net.startPartyMatch(); if (!msg) return;
   closePanel(); net.leaveHub();
-  startMatch({ online: true, hostId: G.myId, roster: msg.roster, kind: msg.kind });
+  startMatch({ online: true, hostId: G.myId, roster: msg.roster, kind: msg.kind, map: msg.map, ranked: msg.ranked });
 }
 
 // ================= QUICK PLAY =================
 let queuedAt = 0;
-async function renderQuick() {
-  title('⚡ Quick Play');
+async function renderQuick(ranked = net.Q.ranked) {
+  current = ranked ? 'ranked' : 'quick';
+  title(ranked ? '🏅 Ranked' : '⚡ Quick Play');
   const Q = net.Q;
+  if (ranked && A.guest) { body().innerHTML = needAccount('Ranked'); wireNeedAccount(); return; }
+  if (Q.on && Q.ranked !== ranked) await net.leaveQueue();
   if (!Q.on) {
     body().innerHTML = '<p class="muted">Joining the queue…</p>';
-    try { await net.leaveParty(); await net.joinQueue(); queuedAt = Date.now(); } catch { body().innerHTML = '<p class="muted">Could not join the queue. Try again.</p>'; return; }
+    try { await net.leaveParty(); await net.joinQueue(ranked); queuedAt = Date.now(); } catch { body().innerHTML = '<p class="muted">Could not join the queue. Try again.</p>'; return; }
   }
   const waited = Math.floor((Date.now() - queuedAt) / 1000);
   body().innerHTML = `
     <div class="queue"><div class="spin"></div>
       <b>${Q.count <= 1 ? 'Searching for players…' : `${Q.count} players found`}</b>
-      <p class="muted">${Q.count >= 2 ? (Q.left ? `Match starts in ${Q.left}s (or as soon as 4 join)` : 'Starting…') : `Waiting ${waited}s • matches fill empty teams with bots`}</p>
+      <p class="muted">${Q.count >= 2 ? (Q.left ? `Match starts in ${Q.left}s (or as soon as 4 join)` : 'Starting…') : `Waiting ${waited}s • ${ranked ? 'ranked needs at least 2 players, no bots' : 'matches fill empty teams with bots'}`}</p>
+      ${ranked ? (() => { const rk = rankOf(myRating()); return `<p><b style="color:${rk.color}">${rk.icon} ${rk.name} • ${myRating()}</b></p>`; })() : ''}
     </div>
     <div class="lbl">YOUR KIT</div>${kitPicker()}
-    ${waited > 25 && Q.count <= 1 ? '<button class="btn wide" id="qBots">Nobody around — play vs Normal bots instead</button>' : ''}
+    ${!ranked && waited > 25 && Q.count <= 1 ? '<button class="btn wide" id="qBots">Nobody around — play vs Normal bots instead</button>' : ''}
     <button class="btn ghost" id="qCancel">Cancel</button>`;
-  wireKitPicker(renderQuick);
+  wireKitPicker(() => renderQuick(ranked));
   body().querySelector('#qCancel').onclick = async () => { await net.leaveQueue(); openPanel('multi'); };
   body().querySelector('#qBots')?.addEventListener('click', async () => { await net.leaveQueue(); soloCfg = { diff: 'normal', layout: '4' }; startSolo(); });
-  clearTimeout(renderQuick._t); renderQuick._t = setTimeout(() => { if (current === 'quick' && G.uiOpen === 'panel') renderQuick(); }, 1000);
+  clearTimeout(renderQuick._t); renderQuick._t = setTimeout(() => { if ((current === 'quick' || current === 'ranked') && G.uiOpen === 'panel' && net.Q.on) renderQuick(ranked); }, 1000);
 }
-async function onQuickGo({ code, host, ids }) {
-  if (current === 'quick') body().innerHTML = '<div class="queue"><div class="spin"></div><b>Match found! Connecting…</b></div>';
+async function onQuickGo({ code, host, ids, ranked }) {
+  if (current === 'quick' || current === 'ranked') body().innerHTML = '<div class="queue"><div class="spin"></div><b>Match found! Connecting…</b></div>';
   try {
     if (host) {
-      await net.createParty(code, { mode: 'solos', bots: true, diff: 'normal', quick: true });
+      await net.createParty(code, { mode: 'solos', bots: !ranked, diff: 'normal', quick: true, ranked: !!ranked });
       const t0 = Date.now();
       while (net.partySize() < ids.length && Date.now() - t0 < 8000) await new Promise(r => setTimeout(r, 250));
+      if (ranked) {
+        const uids = Object.values(net.P.players).map(p => p.uid).filter(Boolean);
+        if (uids.length < 2) { toast('Not enough players joined — back to the queue'); await net.leaveParty(); openPanel('ranked'); return; }
+        net.P.settings.rankedId = await rankedStart(uids);
+      }
       hostStart();
     } else {
       await net.joinParty(code); // the host starts the match automatically
@@ -271,16 +289,17 @@ async function renderProfile() {
   try { await refreshProfile(); } catch {}
   const p = A.profile, lp = levelProgress();
   const kd = p.deaths ? (p.kills / p.deaths).toFixed(2) : p.kills.toFixed(2);
-  const wr = p.games ? Math.round(p.wins / p.games * 100) : 0;
+  const wr = p.games ? Math.round(p.wins / p.games * 100) : 0, rk = rankOf(p.rating ?? 1000);
   body().innerHTML = `
     <div class="profTop"><div class="bigLvl">${lp.level}</div><div><b class="pName">${esc(p.username)}</b>${p.is_admin ? ' <span class="adminTag">ADMIN</span>' : ''}
       <div class="xpBar"><div style="width:${lp.into / lp.need * 100}%"></div></div><small>${lp.into} / ${lp.need} XP to level ${lp.level + 1} • ${p.xp} total XP • 🪙 ${p.coins}</small></div></div>
     <div class="statGrid">
-      ${[['Games', p.games], ['Wins', p.wins], ['Win rate', wr + '%'], ['Kills', p.kills], ['Final kills', p.finals], ['Beds broken', p.beds], ['Deaths', p.deaths], ['K/D', kd], ['Blocks placed', p.blocks], ['Time played', fmtTime(p.play_seconds)], ['Kits owned', p.kits.length + '/' + Object.keys(KITS).length], ['Member since', new Date(p.created_at).toLocaleDateString()]].map(([k, v]) => `<div class="stat"><small>${k}</small><b>${v}</b></div>`).join('')}
+      ${[['Rank', `<span style="color:${rk.color}">${rk.icon} ${rk.name}</span>`], ['Rating', p.rating ?? 1000], ['Ranked games', p.ranked_games ?? 0], ['Ranked wins', p.ranked_wins ?? 0], ['Games', p.games], ['Wins', p.wins], ['Win rate', wr + '%'], ['Kills', p.kills], ['Final kills', p.finals], ['Beds broken', p.beds], ['Deaths', p.deaths], ['K/D', kd], ['Blocks placed', p.blocks], ['Time played', fmtTime(p.play_seconds)], ['Kits owned', p.kits.length + '/' + Object.keys(KITS).length], ['Member since', new Date(p.created_at).toLocaleDateString()]].map(([k, v]) => `<div class="stat"><small>${k}</small><b>${v}</b></div>`).join('')}
     </div>
-    <div class="row" style="margin-top:10px"><button class="btn" id="toLeader">🏆 Leaderboards</button><button class="btn" id="toMissions">📜 Missions</button></div>
+    <div class="row" style="margin-top:10px"><button class="btn" id="toLeader">🏆 Leaderboards</button><button class="btn" id="toLocker">🎨 Locker</button><button class="btn" id="toMissions">📜 Missions</button></div>
     <div class="lbl">RECENT MATCHES</div><div class="list" id="hist"><div class="muted small">Loading…</div></div>`;
   body().querySelector('#toLeader').onclick = () => openPanel('leader');
+  body().querySelector('#toLocker').onclick = () => openPanel('locker');
   body().querySelector('#toMissions').onclick = () => openPanel('missions');
   try {
     const h = await history(); if (current !== 'profile') return;
@@ -291,7 +310,7 @@ let lbCfg = { stat: 'xp', weekly: false };
 async function renderLeader() {
   title('🏆 Leaderboards');
   body().onclick = null;
-  const statName = { xp: 'XP', kills: 'Kills', finals: 'Final kills', beds: 'Beds', wins: 'Wins' };
+  const statName = { xp: 'XP', rating: 'Rating', kills: 'Kills', finals: 'Final kills', beds: 'Beds', wins: 'Wins' };
   body().innerHTML = `${seg('lbStat', Object.entries(statName), lbCfg.stat)}<div style="height:6px"></div>${seg('lbTime', [['0', 'All time'], ['1', 'This week']], lbCfg.weekly ? '1' : '0')}
     <div class="list lb" id="lbList"><div class="muted small">Loading…</div></div>`;
   onSeg('lbStat', v => { lbCfg.stat = v; renderLeader(); });
@@ -299,7 +318,7 @@ async function renderLeader() {
   if (!net.online) { $('lbList').innerHTML = '<div class="muted small">Offline</div>'; return; }
   try {
     const rows = await leaderboard(lbCfg.stat, lbCfg.weekly, 50); if (current !== 'leader') return;
-    $('lbList').innerHTML = rows.length ? rows.map((r, i) => `<div class="li ${r.username === A.profile?.username ? 'me' : ''}"><b class="rank r${i + 1}">${i + 1}</b><span class="lv">${r.level}</span><b>${esc(r.username)}</b><span class="val">${r.value} ${statName[lbCfg.stat]}</span></div>`).join('') : '<div class="muted small">Nobody yet. Be the first!</div>';
+    $('lbList').innerHTML = rows.length ? rows.map((r, i) => `<div class="li ${r.username === A.profile?.username ? 'me' : ''}"><b class="rank r${i + 1}">${i + 1}</b><span class="lv">${r.level}</span><b>${esc(r.username)}</b>${lbCfg.stat === 'rating' ? `<span style="color:${rankOf(r.value).color}">${rankOf(r.value).icon} ${rankOf(r.value).name}</span>` : ''}<span class="val">${r.value} ${statName[lbCfg.stat]}</span></div>`).join('') : '<div class="muted small">Nobody yet. Be the first!</div>';
   } catch (err) { $('lbList').innerHTML = `<div class="muted small">${esc(err.message)}</div>`; }
 }
 
@@ -373,8 +392,8 @@ export function authForm(el, onDone, { allowGuest = true } = {}) {
       try {
         if (mode === 'signup') await signUp(name, pw); else await signIn(name, pw);
         if (A.profile?.banned) { await signOut(); go.disabled = false; draw(); return err('This account is banned.'); }
-        saveSettings(); onDone();
-      } catch (e) { go.disabled = false; go.textContent = mode === 'signup' ? 'CREATE ACCOUNT ▶' : 'LOG IN ▶'; err(e.message); }
+      } catch (e) { go.disabled = false; go.textContent = mode === 'signup' ? 'CREATE ACCOUNT ▶' : 'LOG IN ▶'; return err(e.message); }
+      saveSettings(); onDone();
     };
     go.onclick = submit;
     el.querySelectorAll('input').forEach(i => i.onkeydown = (e) => { if (e.key === 'Enter') submit(); });
@@ -446,6 +465,8 @@ function showUser(u) {
       <div class="row"><input id="adCoins" type="number" placeholder="Coins (+ or -)"><input id="adXp" type="number" placeholder="XP (+ or -)"><button class="btn" id="adGive">APPLY</button></div>
       <div class="lbl">GIVE KIT</div>
       <div class="row"><select id="adKit">${Object.entries(KITS).filter(([id]) => !u.kits.includes(id)).map(([id, k]) => `<option value="${id}">${k.icon} ${k.name}</option>`).join('')}</select><button class="btn" id="adKitGo">GIVE</button></div>
+      <div class="lbl">GIVE COSMETIC</div>
+      <div class="row"><select id="adCos">${Object.entries(COSMETICS).filter(([id, c]) => c.price > 0).map(([id, c]) => `<option value="${id}">${c.icon} ${c.name} (${c.kind})</option>`).join('')}</select><button class="btn" id="adCosGo">GIVE</button></div>
       <div class="lbl">RENAME</div>
       <div class="row"><input id="adName" maxlength="16" placeholder="New username"><button class="btn" id="adNameGo">RENAME</button></div>
       <div class="row" style="margin-top:12px">
@@ -458,9 +479,39 @@ function showUser(u) {
   el.querySelector('#adPwGo').onclick = () => { const pw = el.querySelector('#adPw').value; if (pw.length < 6) return toast('At least 6 characters'); run(() => adminSetPassword(u.id, pw), `Password for ${u.username} changed`); };
   el.querySelector('#adGive').onclick = () => run(() => adminUpdate(u.id, { add_coins: +el.querySelector('#adCoins').value || 0, add_xp: +el.querySelector('#adXp').value || 0 }), 'Updated');
   el.querySelector('#adKitGo').onclick = () => { const k = el.querySelector('#adKit').value; if (k) run(() => adminUpdate(u.id, { give_kit: k }), 'Kit given'); };
+  el.querySelector('#adCosGo').onclick = () => { const k = el.querySelector('#adCos').value; if (k) run(() => adminUpdate(u.id, { give_cosmetic: k }), 'Cosmetic given'); };
   el.querySelector('#adNameGo').onclick = () => { const n = el.querySelector('#adName').value.trim(); if (!validName(n)) return toast('3–16 letters, numbers or _'); run(async () => { await renameUser(u, n); }, 'Renamed'); };
   el.querySelector('#adBan').onclick = () => { if (!u.banned && !confirm(`Ban ${u.username}?`)) return; run(() => adminUpdate(u.id, { banned: !u.banned }), u.banned ? 'Unbanned' : 'Banned'); };
   el.querySelector('#adAdm').onclick = () => { if (!confirm(u.is_admin ? `Remove admin from ${u.username}?` : `Make ${u.username} an admin? They will be able to change any account.`)) return; run(() => adminUpdate(u.id, { is_admin: !u.is_admin }), 'Updated'); };
 }
 // A rename must also change the hidden login email, which needs the database function.
 async function renameUser(u, n) { await adminUpdate(u.id, { username: n }); }
+
+// ================= LOCKER (cosmetics) =================
+let lockerTab = 'skin';
+function renderLocker() {
+  title('🎨 Locker');
+  const tabs = [['skin', '🎩 Hats'], ['bed', '🛏️ Beds'], ['kill', '💥 Kill effects'], ['name', '🏷️ Name colours'], ['emote', '🕺 Emotes']];
+  const look = myLook();
+  const items = Object.entries(COSMETICS).filter(([, c]) => c.kind === lockerTab);
+  body().innerHTML = `
+    <p class="muted">Spend coins on cosmetics. ${A.guest ? '<b>Guests can only use the free ones.</b>' : `You have <b class="coins">🪙 ${A.profile.coins}</b>`} ${lockerTab === 'emote' ? 'Press <b>X</b> in game to emote.' : ''}</p>
+    ${seg('lkTab', tabs, lockerTab)}
+    <div class="cards" style="margin-top:10px">${items.map(([id, c]) => {
+      const owned = ownsCosmetic(id), on = lockerTab !== 'emote' && look[lockerTab] === id;
+      const st = on ? '<span class="price owned">EQUIPPED</span>' : owned ? (lockerTab === 'emote' ? '<span class="price owned">OWNED</span>' : `<button class="btn sm" data-eq="${id}">EQUIP</button>`)
+        : A.guest ? '<span class="price muted">Account needed</span>' : `<button class="btn sm buy" data-buy="${id}">🪙 ${c.price}</button>`;
+      const prev = c.kind === 'name' ? `<b style="${c.color === 'rainbow' ? 'background:linear-gradient(90deg,#ff5252,#ffe45c,#4dff8a,#38c6ff,#b47dff);-webkit-background-clip:text;color:transparent' : 'color:' + c.color}">${esc(G.name)}</b>` : '';
+      return `<div class="card ${on ? 'eq kit' : ''}"><div class="cIco lockerPrev">${c.icon}</div><b>${c.name}</b>${prev ? `<small>${prev}</small>` : ''}${st}</div>`;
+    }).join('')}</div>`;
+  onSeg('lkTab', v => { lockerTab = v; renderLocker(); });
+  body().onclick = async (e) => {
+    const eq = e.target.closest('[data-eq]'), buy = e.target.closest('[data-buy]');
+    try {
+      if (eq) { await equipCosmetic(eq.dataset.eq); sfx.click(); toast(COSMETICS[eq.dataset.eq].name + ' equipped'); }
+      else if (buy) { const c = COSMETICS[buy.dataset.buy]; if (!confirm(`Buy ${c.name} for ${c.price} coins?`)) return; await buyCosmetic(buy.dataset.buy); sfx.buy(); toast(c.name + ' unlocked!', 'good'); }
+      else return;
+      hooks.refreshCard?.(); renderLocker();
+    } catch (err) { sfx.deny(); toast(err.message); }
+  };
+}

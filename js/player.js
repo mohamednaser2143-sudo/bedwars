@@ -5,12 +5,14 @@ import { PHYS, COMBAT, ITEMS, BLOCKS } from './config.js';
 import { moveEntity } from './physics.js';
 import { raycast, getCell, toCell, toCellY, cellX, cellY, boxHits } from './grid.js';
 import { itemMesh } from './avatar.js';
-import { swing, useItem, trackFall } from './combat.js';
+import { swing, useItem, trackFall, balloonLift } from './combat.js';
 import { placeBlock, breakBlock, canPlace } from './actions.js';
 import { selectSlot, openInventory, closeInventory, renderHotbar } from './invui.js';
 import { openShop, openUpgrades, closeShop, closeUpgrades } from './shop.js';
 import { openChat, closeChat, $, toast } from './ui.js';
 import { sfx, toggleMute } from './audio.js';
+import { myEmotes } from './account.js';
+import { COSMETICS } from './config.js';
 
 const keys = G.input.keys;
 let hooks = { onEscape: null, onInteract: null, onTab: null };
@@ -29,7 +31,8 @@ export function initInput() {
     if (['Space', 'Tab', 'KeyW', 'KeyA', 'KeyS', 'KeyD'].includes(e.code)) e.preventDefault();
     keys[e.code] = true;
     if (e.repeat) return;
-    if (e.code.startsWith('Digit')) { const n = +e.code.slice(5); if (n >= 1 && n <= 9 && G.mode === 'match') selectSlot(n - 1); }
+    if (e.code.startsWith('Digit')) { const n = +e.code.slice(5); if (wheelOpen) { pickEmote(n - 1); return; } if (n >= 1 && n <= 9 && G.mode === 'match') selectSlot(n - 1); }
+    if (e.code === 'KeyX') toggleEmoteWheel();
     if (e.code === 'KeyE' && G.mode === 'match') { if (G.uiOpen === 'inv') closeInventory(); else if (!G.uiOpen) openInventory(); }
     if (e.code === 'Escape') { closeAll(); hooks.onEscape?.(); }
     if (e.code === 'KeyV') toggleFirstPerson();
@@ -72,7 +75,26 @@ export function initInput() {
   document.addEventListener('pointerlockchange', () => { G.input.locked = !!document.pointerLockElement; $('crosshair').classList.toggle('on', G.input.locked); });
 }
 
-export function closeAll() { closeInventory(); closeShop(); closeUpgrades(); }
+// ---------- EMOTES ----------
+let wheelOpen = false, emoteSeq = 0;
+function emoteList() { return myEmotes(); }
+export function toggleEmoteWheel(force) {
+  wheelOpen = force ?? !wheelOpen;
+  const el = $('emoteWheel');
+  if (!wheelOpen) { el.style.display = 'none'; return; }
+  if (!G.local?.alive || G.uiOpen) { wheelOpen = false; return; }
+  el.innerHTML = '<div class="ewT">EMOTES — press a number</div>' + emoteList().map((id, i) => `<button data-e="${id}"><span class="k">${i + 1}</span>${COSMETICS[id].icon}<small>${COSMETICS[id].name}</small></button>`).join('');
+  el.style.display = 'grid';
+  el.onclick = (ev) => { const b = ev.target.closest('[data-e]'); if (b) { playLocalEmote(b.dataset.e); toggleEmoteWheel(false); } };
+}
+function pickEmote(i) { const id = emoteList()[i]; if (id) playLocalEmote(id); toggleEmoteWheel(false); }
+export function playLocalEmote(id) {
+  const e = G.local; if (!e?.alive) return;
+  e.avatar.playEmote(id); e.emote = { id, seq: ++emoteSeq };
+  G.match?.onLocalChanged?.(); G.onEmote?.();
+}
+
+export function closeAll() { toggleEmoteWheel(false); closeInventory(); closeShop(); closeUpgrades(); }
 
 function toggleFirstPerson(v) {
   G.cam.first = v ?? !G.cam.first;
@@ -81,6 +103,7 @@ function toggleFirstPerson(v) {
 
 // ---------- MOVEMENT ----------
 const tmp = new THREE.Vector3();
+let stepT = 0;
 export function updateLocalMovement(dt) {
   const e = G.local; if (!e || !e.alive) return;
   const k = G.input.typing || G.uiOpen === 'inv' || G.uiOpen === 'shop' || G.uiOpen === 'up' ? {} : keys;
@@ -100,20 +123,26 @@ export function updateLocalMovement(dt) {
   // a bit of acceleration so movement feels less robotic
   const a = 1 - Math.exp(-(e.onGround ? 18 : 6) * dt);
   e.vel.x += (mx * sp - e.vel.x) * a; e.vel.z += (mz * sp - e.vel.z) * a;
-  if (k.Space && e.onGround) { e.vel.y = PHYS.jump * (e.effects.jump > now ? 1.32 : 1); e.onGround = false; }
+  if (k.Space && e.onGround) { e.vel.y = PHYS.jump * (e.effects.jump > now ? 1.32 : 1); e.onGround = false; sfx.jump(); }
   // crouching never walks you off an edge (like sneaking in Minecraft)
   if (e.crouch && e.onGround && e.vel.y <= 0) {
     if (!supported(e.pos.x + (e.vel.x + e.kb.x) * dt, e.pos.y, e.pos.z)) { e.vel.x = 0; e.kb.x = 0; }
     if (!supported(e.pos.x, e.pos.y, e.pos.z + (e.vel.z + e.kb.z) * dt)) { e.vel.z = 0; e.kb.z = 0; }
   }
   const wasGround = e.onGround;
+  const fallV = e.vel.y;
+  balloonLift(e, dt);
   moveEntity(e, dt);
   trackFall(e, wasGround);
+  // footsteps + landing thud
+  if (!wasGround && e.onGround && fallV < -18) sfx.land(-fallV / 18);
+  if (e.onGround && len > 0) { stepT += dt * (e.crouch ? .5 : 1); if (stepT > .34) { stepT = 0; sfx.step(); } } else stepT = .2;
   // facing: shift-lock style when the mouse is locked, else face where we walk
   if (G.input.locked || G.cam.first) e.yaw = yaw + Math.PI;
   else if (len > 0) { const want = Math.atan2(mx, mz); let d = want - e.yaw; d = Math.atan2(Math.sin(d), Math.cos(d)); e.yaw += d * Math.min(1, dt * 14); }
   e.avatar.group.rotation.y = e.yaw;
   e.avatar.setHeld(G.mode === 'match' ? e.heldItem() : null);
+  e.avatar.setBalloons(e.balloons);
   e.avatar.animate(dt, len > 0 && e.onGround, !e.onGround);
 }
 
@@ -126,8 +155,39 @@ function supported(x, y, z) {
 // ---------- CAMERA ----------
 let viewModel = null, vmId = null, shakeAmt = 0, bob = 0;
 export function shake(a) { shakeAmt = Math.max(shakeAmt, a); }
+const spectating = () => G.mode === 'match' && G.match && !G.match.over && G.local?.finalDead;
+function spectate(dt) {
+  const cam = G.camera, S = G.spec ||= { pos: cam.position.clone(), follow: null };
+  const dir = new THREE.Vector3(-Math.sin(G.cam.yaw) * Math.cos(G.cam.pitch), Math.sin(G.cam.pitch), -Math.cos(G.cam.yaw) * Math.cos(G.cam.pitch));
+  if (S.follow && (!S.follow.alive || !G.entities.has(S.follow.id))) S.follow = null;
+  if (S.follow) {
+    const t = S.follow.pos.clone().add(new THREE.Vector3(0, 4, 0));
+    S.pos.copy(t).addScaledVector(dir, -14);
+    $('specHint').textContent = `👁️ Watching ${S.follow.name} — click for next player • right click for free camera`;
+  } else {
+    const k = G.input.typing ? {} : keys, sp = 34 * dt;
+    const right = new THREE.Vector3(Math.cos(G.cam.yaw), 0, -Math.sin(G.cam.yaw));
+    if (k.KeyW) S.pos.addScaledVector(dir, sp); if (k.KeyS) S.pos.addScaledVector(dir, -sp);
+    if (k.KeyD) S.pos.addScaledVector(right, sp); if (k.KeyA) S.pos.addScaledVector(right, -sp);
+    if (k.Space) S.pos.y += sp; if (k.ShiftLeft || k.ShiftRight) S.pos.y -= sp;
+    $('specHint').textContent = '👁️ SPECTATING — click to follow a player • WASD / Space / Shift to fly';
+  }
+  $('specHint').style.display = 'block';
+  cam.position.copy(S.pos); cam.lookAt(S.pos.clone().add(dir));
+}
+function cycleSpectate(dir = 1) {
+  const list = [...G.entities.values()].filter(x => x.alive && x !== G.local);
+  if (!list.length) return;
+  const S = G.spec ||= { pos: G.camera.position.clone(), follow: null };
+  const i = S.follow ? list.indexOf(S.follow) : -1;
+  S.follow = list[(i + dir + list.length) % list.length];
+}
+
 export function updateCamera(dt) {
   const e = G.local, cam = G.camera; if (!e) return;
+  if (G.podiumCam) { cam.position.lerp(G.podiumCam.pos, Math.min(1, dt * 3)); cam.lookAt(G.podiumCam.target); if (viewModel) viewModel.visible = false; e.avatar.group.visible = false; $('specHint').style.display = 'none'; return; }
+  if (spectating()) { spectate(dt); if (viewModel) viewModel.visible = false; return; }
+  $('specHint').style.display = 'none';
   const head = new THREE.Vector3(e.pos.x, e.pos.y + (e.crouch ? 3.7 : 4.4), e.pos.z);
   const dir = new THREE.Vector3(-Math.sin(G.cam.yaw) * Math.cos(G.cam.pitch), Math.sin(G.cam.pitch), -Math.cos(G.cam.yaw) * Math.cos(G.cam.pitch));
   if (G.cam.first || !e.alive) {
@@ -183,19 +243,21 @@ export function setNpcHook(fn) { npcHook = fn; }
 function heldDef() { const s = G.local.inv.slots[G.selected]; return s ? ITEMS[s.id] : null; }
 
 function primaryDown() {
+  if (spectating()) { cycleSpectate(1); return; }
   if (G.mode !== 'match') { G.local.avatar.swing(); sfx.swing(); return; }
   const e = G.local; if (!e.alive || G.match?.over) return;
   if (npcHook?.()) return;
   const d = heldDef();
   if (d?.type === 'block') { tryPlace(); return; }
-  if (d && ['bow', 'throw', 'food', 'potion'].includes(d.type)) { useHeld(); return; }
+  if (d && ['bow', 'throw', 'food', 'potion', 'balloon'].includes(d.type)) { useHeld(); return; }
   attackOrMine();
 }
 function secondaryDown() {
+  if (spectating()) { if (G.spec) G.spec.follow = null; return; }
   if (G.mode !== 'match') return;
   const d = heldDef();
   if (d?.type === 'block') tryPlace();
-  else if (d && ['bow', 'throw', 'food', 'potion'].includes(d.type)) useHeld();
+  else if (d && ['bow', 'throw', 'food', 'potion', 'balloon'].includes(d.type)) useHeld();
 }
 
 // ---------- BOW CHARGE ----------
@@ -249,6 +311,8 @@ export function mineTime(cell) {
   const e = G.local; const pick = e.inv.best('pickaxe');
   let sp = pick ? ITEMS[pick].speed : 1;
   const held = heldDef(); if (held?.type === 'pickaxe') sp *= 1.15;
+  if (held?.type === 'shears' && cell.type === 'wool') sp *= 7;
+  if (held?.type === 'axe' && cell.type === 'planks') sp *= 3.5;
   sp *= 1 + .25 * (G.match?.teamUp[e.team]?.haste || 0);
   if (e.kit === 'miner') sp *= 1.4;
   return BLOCKS[cell.type].hard / sp;
@@ -349,7 +413,7 @@ export function updateMatchActions(dt) {
     const h = aimHit(COMBAT.mineReach);
     const target = h && h.cell.breakable && !(h.cell.type === 'bed' && h.cell.bedTeam === e.team) ? h.cell : null;
     if (target) { outline.position.set(cellX(target.gx), cellY(target.gy), target.gz * 3); outline.scale.set(1, target.h, 1); outline.position.y -= 1.5 * (1 - target.h); outline.visible = true; }
-    if (G.input.mouseL && (!d || d.type === 'sword' || d.type === 'pickaxe' || d.type === 'ammo')) {
+    if (G.input.mouseL && (!d || ['sword', 'pickaxe', 'ammo', 'shears', 'axe'].includes(d.type))) {
       // keep swinging / mining while held
       if (performance.now() - e.lastSwing >= COMBAT.cooldown + 40) attackOrMine();
       if (mining && mining.cell !== target) mining = null;

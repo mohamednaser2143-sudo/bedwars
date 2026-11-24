@@ -2,7 +2,7 @@
 // All the rules (XP, coins, prices) are enforced by the database functions in supabase/setup.sql.
 import { sb, online } from './net.js';
 import { G } from './state.js';
-import { KITS, levelNeed } from './config.js';
+import { KITS, levelNeed, COSMETICS, FREE_COSMETICS, DEFAULT_LOOK, rankOf } from './config.js';
 
 export const A = { user: null, profile: null, guest: true };
 const EMAIL_DOMAIN = 'players.example.com';
@@ -104,6 +104,22 @@ export async function history() {
   const { data, error } = await sb.from('match_results').select('*').eq('user_id', A.user.id).order('created_at', { ascending: false }).limit(15);
   if (error) throw new Error(errText(error)); return data;
 }
+
+// ---------- cosmetics ----------
+export const ownsCosmetic = (id) => A.guest ? FREE_COSMETICS.includes(id) : !!A.profile?.cosmetics?.includes(id) || FREE_COSMETICS.includes(id);
+export function myLook() {
+  if (A.guest) return { ...DEFAULT_LOOK };
+  return { ...DEFAULT_LOOK, ...(A.profile?.equipped || {}) };
+}
+export const myEmotes = () => Object.keys(COSMETICS).filter(k => COSMETICS[k].kind === 'emote' && ownsCosmetic(k));
+export async function buyCosmetic(id) { const r = await rpc('buy_cosmetic', { item: id }); await refreshProfile(); return r; }
+export async function equipCosmetic(id) { const r = await rpc('equip_cosmetic', { item: id }); A.profile.equipped = r; return r; }
+
+// ---------- ranked ----------
+export const myRating = () => A.profile?.rating ?? 1000;
+export const myRank = () => rankOf(myRating());
+export const rankedStart = (ids) => rpc('ranked_start', { player_ids: ids });
+export const rankedFinish = (id, placements) => rpc('ranked_finish', { match_id: id, placements });
 
 // ---------- friends ----------
 export const myFriends = () => rpc('my_friends');

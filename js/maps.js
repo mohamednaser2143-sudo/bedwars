@@ -1,24 +1,24 @@
 // Builds the match map and the hub lobby.
 import { THREE, mat, box, tex, repeatTex, textSprite } from './engine.js';
 import { G } from './state.js';
-import { TEAMS, TEAM_KEYS } from './config.js';
+import { TEAMS, TEAM_KEYS, MAPS } from './config.js';
 import { setCell } from './grid.js';
 import { Avatar } from './avatar.js';
 
 // A floating island: ground cells (collision) + textured visual + rocky underside.
-function island(cx, cz, half, { top = 'grass', trim = null, layers = 3 } = {}) {
+function island(cx, cz, half, { top = 'grass', side = null, under = 'dirt', trim = null, layers = 3 } = {}) {
   for (let x = cx - half; x <= cx + half; x++) for (let z = cz - half; z <= cz + half; z++) setCell(x, 0, z, 'ground', { mesh: false });
   const n = half * 2 + 1, w = n * 3;
-  const side = top === 'grass' ? repeatTex(tex('grassSide'), n, 1) : repeatTex(tex('stone'), n, 1);
+  const sideT = repeatTex(tex(side || (top === 'grass' ? 'grassSide' : top)), n, 1);
   const topT = repeatTex(tex(top), n, n);
-  const sideM = mat(0xffffff, { map: side }), topM = mat(0xffffff, { map: topT }), botM = mat(0xffffff, { map: repeatTex(tex('dirt'), n, n) });
+  const sideM = mat(0xffffff, { map: sideT }), topM = mat(0xffffff, { map: topT }), botM = mat(0xffffff, { map: repeatTex(tex(under), n, n) });
   const slab = new THREE.Mesh(new THREE.BoxGeometry(w, 3, w), [sideM, sideM, topM, botM, sideM, sideM]);
   slab.position.set(cx * 3, -1.5, cz * 3); slab.receiveShadow = true; slab.castShadow = true;
   G.world.add(slab);
   let s = w, y = -3;
   for (let i = 0; i < layers; i++) {
     s *= 0.72; const h = 5 + i * 1.5; y -= h / 2;
-    const m = box(s, h, s, mat(0xffffff, { map: repeatTex(tex(i === 0 ? 'dirt' : 'stone'), Math.max(1, s / 6), 1) }));
+    const m = box(s, h, s, mat(0xffffff, { map: repeatTex(tex(i === 0 ? under : (under === 'netherrack' ? 'netherrack' : 'stone')), Math.max(1, s / 6), 1) }));
     m.position.set(cx * 3, y, cz * 3); m.castShadow = false; G.world.add(m); y -= h / 2;
   }
   if (trim != null) {
@@ -34,14 +34,23 @@ function lamp(x, z, color) {
   const l = box(1.6, 1.6, 1.6, mat(color, { emissive: color, ei: .9 })); l.position.set(x, 6.6, z); G.world.add(l);
 }
 
-function bedMesh(team) {
-  const g = new THREE.Group();
-  const frame = box(2.8, .7, 5.8, mat(0x6b3f1f)); frame.position.y = .4;
+// design: a bed cosmetic id (bed_default, bed_striped, ...)
+function bedMesh(team, design = 'bed_default') {
+  const g = new THREE.Group(), c = TEAMS[team].color;
+  let frameC = 0x6b3f1f, blanket = mat(c), pillowC = 0xffffff, headC = 0x7a4b28, frameOpt = {};
+  if (design === 'bed_striped') blanket = mat(0xffffff, { map: tex('stripes', c) });
+  else if (design === 'bed_candy') { blanket = mat(0xffffff, { map: tex('candy') }); frameC = 0xf4f4f4; headC = 0xff9ee0; pillowC = 0xffd6f2; }
+  else if (design === 'bed_checker') blanket = mat(0xffffff, { map: tex('checker', c) });
+  else if (design === 'bed_royal') { frameC = 0xe0b32e; headC = 0xe0b32e; frameOpt = { metal: .8, rough: .25 }; pillowC = 0xfff2c2; }
+  else if (design === 'bed_lava') { blanket = mat(0xff5a14, { emissive: 0xff3a00, ei: .8 }); frameC = 0x2a1a14; headC = 0x2a1a14; }
+  else if (design === 'bed_space') { blanket = mat(0xffffff, { map: tex('stars'), emissive: 0x3a1a7a, ei: .35 }); frameC = 0x1b1530; headC = 0x2a2148; pillowC = 0xb47dff; }
+  const frame = box(2.8, .7, 5.8, mat(frameC, frameOpt)); frame.position.y = .4;
   const matt = box(2.7, .5, 5.5, mat(0xf3f3f3)); matt.position.y = 1;
-  const blanket = box(2.8, .55, 3.6, mat(TEAMS[team].color)); blanket.position.set(0, 1.2, -.9);
-  const pillow = box(2.2, .5, 1.1, mat(0xffffff)); pillow.position.set(0, 1.35, 2.1);
-  const head = box(2.9, 2, .4, mat(0x7a4b28)); head.position.set(0, 1.1, 2.85);
-  g.add(frame, matt, blanket, pillow, head);
+  const bl = box(2.8, .55, 3.6, blanket); bl.position.set(0, 1.2, -.9);
+  const pillow = box(2.2, .5, 1.1, mat(pillowC)); pillow.position.set(0, 1.35, 2.1);
+  const head = box(2.9, 2, .4, mat(headC, frameOpt)); head.position.set(0, 1.1, 2.85);
+  g.add(frame, matt, bl, pillow, head);
+  if (design === 'bed_royal') { const crown = box(1.2, .5, .3, mat(0xffd34e, { emissive: 0x7a5a00, ei: .5, metal: .8 })); crown.position.set(0, 2.35, 2.85); g.add(crown); }
   return g;
 }
 
@@ -55,13 +64,17 @@ function npc(x, z, yaw, shirt, label, labelColor, bg) {
 }
 
 // ---------------- MATCH MAP ----------------
-export function buildMatchMap(teamsInPlay) {
-  const info = { spawns: {}, beds: {}, gens: [], npcs: [], noBuild: [] };
+// mapId: key of MAPS. bedLooks: { team: bed cosmetic id }
+export function buildMatchMap(teamsInPlay, mapId = 'classic', bedLooks = {}) {
+  const M = MAPS[mapId] || MAPS.classic, th = M.theme;
+  const info = { spawns: {}, beds: {}, gens: [], npcs: [], noBuild: [], islands: [], map: mapId };
+  const isl = (cx, cz, half, opts) => { island(cx, cz, half, opts); info.islands.push({ cx, cz, half, kind: opts.kind || 'base' }); };
   for (const t of TEAM_KEYS) {
     const T = TEAMS[t], f = { x: T.fx, z: T.fz }, r = { x: -T.fz, z: T.fx };
-    const L = (a, b) => [T.cx + r.x * a + f.x * b, T.cz + r.z * a + f.z * b];
+    const cx0 = -T.fx * M.dist, cz0 = -T.fz * M.dist;
+    const L = (a, b) => [cx0 + r.x * a + f.x * b, cz0 + r.z * a + f.z * b];
     const yaw = Math.atan2(f.x, f.z);
-    island(T.cx, T.cz, 7, { trim: T.color });
+    isl(cx0, cz0, 7, { top: th.top, side: th.side, under: th.under, trim: T.color, kind: 'base', team: t });
     const [sx, sz] = L(0, -1);
     info.spawns[t] = { x: sx * 3, y: .1, z: sz * 3, yaw };
     info.noBuild.push([sx, sz, 1]);
@@ -78,29 +91,36 @@ export function buildMatchMap(teamsInPlay) {
     const up = npc(ux * 3, uz * 3, yaw, 0x22b866, 'TEAM UPGRADES', '#7dffb0', 'rgba(12,60,42,.9)');
     info.npcs.push({ type: 'shop', team: t, pos: shop.group.position, avatar: shop }, { type: 'up', team: t, pos: up.group.position, avatar: up });
     info.noBuild.push([px, pz, 1], [ux, uz, 1]);
-    lamp((T.cx + r.x * 7 + f.x * 7) * 3, (T.cz + r.z * 7 + f.z * 7) * 3, T.color);
-    lamp((T.cx - r.x * 7 + f.x * 7) * 3, (T.cz - r.z * 7 + f.z * 7) * 3, T.color);
+    lamp((cx0 + r.x * 7 + f.x * 7) * 3, (cz0 + r.z * 7 + f.z * 7) * 3, T.color);
+    lamp((cx0 - r.x * 7 + f.x * 7) * 3, (cz0 - r.z * 7 + f.z * 7) * 3, T.color);
     // bed (2 cells along forward)
     if (teamsInPlay.includes(t)) {
       const [b1x, b1z] = L(0, 3), [b2x, b2z] = L(0, 4);
       const cells = [[b1x, 1, b1z], [b2x, 1, b2z]];
       for (const c of cells) setCell(c[0], c[1], c[2], 'bed', { h: .55, bedTeam: t, mesh: false });
-      const m = bedMesh(t); m.position.set((b1x + b2x) * 1.5, 0, (b1z + b2z) * 1.5); m.rotation.y = yaw + Math.PI; G.world.add(m);
+      const m = bedMesh(t, bedLooks[t]); m.position.set((b1x + b2x) * 1.5, 0, (b1z + b2z) * 1.5); m.rotation.y = yaw + Math.PI; G.world.add(m);
       info.beds[t] = { alive: true, cells, mesh: m };
     } else info.beds[t] = { alive: false, cells: [], mesh: new THREE.Group() };
     // diamond island in front of the base
-    const dx = T.fx * 18, dz = T.fz * 18;
-    island(T.cx + dx, T.cz + dz, 2, { top: 'stone', layers: 2 });
-    const dcore = box(2.4, 2.4, 2.4, mat(0x5ee8ff, { emissive: 0x1aa6c4, ei: .6, metal: .3, rough: .3 })); dcore.position.set((T.cx + dx) * 3, 2.2, (T.cz + dz) * 3); G.world.add(dcore);
-    const dl = textSprite('💎 Diamond', { color: '#7eeaff', bg: 'rgba(10,40,55,.85)', scale: .6 }); dl.position.set((T.cx + dx) * 3, 6.5, (T.cz + dz) * 3); G.world.add(dl);
-    info.gens.push({ kind: 'diamond', pos: new THREE.Vector3((T.cx + dx) * 3, 0, (T.cz + dz) * 3), n: 0, t: 0, label: dl, spin: dcore, lastTxt: '' });
+    const dcx = -T.fx * M.diamond, dcz = -T.fz * M.diamond;
+    isl(dcx, dcz, 2, { top: th.midTop, side: th.midTop, under: th.under, layers: 2, kind: 'diamond' });
+    const dcore = box(2.4, 2.4, 2.4, mat(0x5ee8ff, { emissive: 0x1aa6c4, ei: .6, metal: .3, rough: .3 })); dcore.position.set(dcx * 3, 2.2, dcz * 3); G.world.add(dcore);
+    const dl = textSprite('💎 Diamond', { color: '#7eeaff', bg: 'rgba(10,40,55,.85)', scale: .6 }); dl.position.set(dcx * 3, 6.5, dcz * 3); G.world.add(dl);
+    info.gens.push({ kind: 'diamond', pos: new THREE.Vector3(dcx * 3, 0, dcz * 3), n: 0, t: 0, label: dl, spin: dcore, lastTxt: '' });
   }
   // middle emerald island
-  island(0, 0, 5, { top: 'stone', layers: 3 });
-  for (const [x, z] of [[-3, -3], [3, -3], [-3, 3], [3, 3]]) { setCell(x, 1, z, 'stone'); setCell(x, 2, z, 'stone'); }
+  const mh = M.mid;
+  isl(0, 0, mh, { top: th.midTop, side: th.midTop, under: th.under, layers: 3, kind: 'mid' });
+  const deco = th.top === 'netherrack' ? 'netherbrick' : th.midTop === 'sandstone' ? 'sandstone' : 'stone';
+  const pillar = (x, z, h) => { for (let y = 1; y <= h; y++) { const c = setCell(x, y, z, 'stone', { mesh: false }); const m = box(3, 3, 3, mat(0xffffff, { map: tex(deco) })); m.position.set(x * 3, y * 3 - 1.5, z * 3); G.world.add(m); } };
+  if (M.pillars === 'corners') for (const [x, z] of [[-3, -3], [3, -3], [-3, 3], [3, 3]]) pillar(x, z, 2);
+  else if (M.pillars === 'ring') for (let i = 0; i < 8; i++) { const a = i * Math.PI / 4; pillar(Math.round(Math.cos(a) * 4), Math.round(Math.sin(a) * 4), i % 2 ? 1 : 3); }
+  else if (M.pillars === 'ruins') { for (const [x, z, h] of [[-4, -2, 2], [-4, -1, 3], [-4, 0, 1], [4, 1, 3], [4, 2, 2], [-1, 4, 2], [0, 4, 3], [1, -4, 1], [2, -4, 2]]) pillar(x, z, h); }
+  else if (M.pillars === 'spikes') for (const [x, z, h] of [[-3, -3, 4], [3, 3, 4], [3, -3, 2], [-3, 3, 2], [0, 4, 1], [0, -4, 1]]) pillar(x, z, h);
   const ecore = box(2.8, 2.8, 2.8, mat(0x39ff80, { emissive: 0x17a84e, ei: .7, metal: .3, rough: .3 })); ecore.position.set(0, 2.4, 0); G.world.add(ecore);
   const el = textSprite('🟩 Emerald', { color: '#7dffb0', bg: 'rgba(10,55,35,.85)', scale: .7 }); el.position.set(0, 7.2, 0); G.world.add(el);
   info.gens.push({ kind: 'emerald', pos: new THREE.Vector3(0, 0, 0), n: 0, t: 0, label: el, spin: ecore, lastTxt: '' });
+  info.extent = (M.dist + 9) * 3;
   return info;
 }
 
@@ -118,7 +138,7 @@ export function buildHubMap() {
   // central statue: a giant bed
   const ped = box(9, 2, 9, mat(0x8b9096, { map: tex('stone_brick') })); ped.position.set(0, 1, 6); G.world.add(ped);
   for (let x = -1; x <= 1; x++) for (let z = 1; z <= 3; z++) setCell(x, 1, z, 'ground', { mesh: false, h: 2 / 3 });
-  const big = bedMesh('blue'); big.scale.setScalar(1.3); big.position.set(0, 2, 6); big.rotation.y = .5; G.world.add(big);
+  const big = bedMesh('blue', 'bed_royal'); big.scale.setScalar(1.3); big.position.set(0, 2, 6); big.rotation.y = .5; G.world.add(big);
   const title = textSprite('FIGHT ON A BASEPLATE', { color: '#ffffff', bg: 'rgba(6,14,28,.75)', scale: 1.6, font: 'bold 54px "Segoe UI",Arial' });
   title.position.set(0, 16, -32); G.world.add(title);
   // portals

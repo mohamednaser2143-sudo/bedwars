@@ -1,14 +1,17 @@
 // Match lifecycle: setup, generators, respawns, sync, HUD, win screen.
 import { THREE, disposeGroup, setSpriteText, burst } from './engine.js';
 import { G } from './state.js';
-import { TEAMS, TEAM_KEYS, GEN, COMBAT, PHYS, ITEMS, ARMOR, UPGRADES, CURRENCY, TIMELINE, KITS } from './config.js';
-import { A, submitMatch, levelProgress } from './account.js';
+import { TEAMS, TEAM_KEYS, GEN, COMBAT, PHYS, ITEMS, ARMOR, UPGRADES, CURRENCY, TIMELINE, KITS, MAPS, MAP_KEYS, DEFAULT_LOOK, COSMETICS, TIPS, rankOf } from './config.js';
+import { A, submitMatch, levelProgress, myLook, rankedFinish, refreshProfile } from './account.js';
+import { Avatar } from './avatar.js';
+import { textSprite, mat as mkMat, box as mkBox } from './engine.js';
+import { applyTheme } from './engine.js';
 import { clearGrid, setCell, removeCell, getCell, cellX, cellY } from './grid.js';
 import { moveEntity } from './physics.js';
 import { buildMatchMap } from './maps.js';
 import { Entity } from './entity.js';
 import { initBotAI, updateBot } from './bots.js';
-import { applyHit, killEntity, trackFall, onKillEvent, updateProjectiles, clearProjectiles, remoteProjectile, remoteProjectileEnd } from './combat.js';
+import { applyHit, killEntity, trackFall, balloonLift, onKillEvent, updateProjectiles, clearProjectiles, remoteProjectile, remoteProjectileEnd } from './combat.js';
 import { applyBedDestroyed, destroyBed } from './actions.js';
 import { updateLocalMovement, updateMatchActions, resetActions, shake, setPlayerHooks, setNpcHook, closeAll } from './player.js';
 import { buildHotbar, renderHotbar, renderResources, selectSlot } from './invui.js';
@@ -28,12 +31,20 @@ export function startMatch(cfg) {
   G.entities.clear(); clearGrid(); clearProjectiles(); resetActions(); closeAll();
 
   const teams = [...new Set(cfg.roster.map(r => r.team))];
-  const map = buildMatchMap(teams);
+  const mapId = MAPS[cfg.map] ? cfg.map : MAP_KEYS[Math.floor(Math.random() * MAP_KEYS.length)];
+  // cosmetics: each player's look; a team's bed uses its first real player's bed design
+  const looks = {}, bedLooks = {};
+  for (const r of cfg.roster) {
+    looks[r.id] = r.id === G.myId ? myLook() : r.bot ? botLook(r.id) : { ...DEFAULT_LOOK, ...(r.look || {}) };
+    if (!r.bot && !bedLooks[r.team]) bedLooks[r.team] = looks[r.id].bed;
+  }
+  applyTheme(MAPS[mapId].theme);
+  const map = buildMatchMap(teams, mapId, bedLooks);
   const m = G.match = {
     online: !!cfg.online, hostId: cfg.hostId || G.myId, teams, over: false, startedAt: performance.now(), tier: 0, nextEvent: 0, sudden: false,
     beds: map.beds, spawns: map.spawns, gens: map.gens, npcs: map.npcs, noBuild: map.noBuild,
     teamUp: Object.fromEntries(TEAM_KEYS.map(t => [t, { sharp: 0, prot: 0, haste: 0, forge: 0, heal: 0, trap: 0 }])),
-    stats: {}, roster: cfg.roster, kind: cfg.kind || (cfg.online ? 'mp' : 'solo'), diff: cfg.diff || null, myBlocks: 0, myArrows: 0, submitted: false,
+    stats: {}, roster: cfg.roster, looks, mapId, islands: map.islands, extent: map.extent, ranked: cfg.ranked || null, elimOrder: [], kind: cfg.kind || (cfg.online ? 'mp' : 'solo'), diff: cfg.diff || null, myBlocks: 0, myArrows: 0, submitted: false,
     send: (k, d) => { if (m.online) net.sendMatch(k, d); },
     isAuth: () => !m.online || net.authorityId(m.hostId) === G.myId,
     statFor: (id, name, team) => { if (!id) return null; return m.stats[id] ||= { name, team, kills: 0, finals: 0, beds: 0, deaths: 0 }; },
@@ -47,7 +58,8 @@ export function startMatch(cfg) {
     const e = new Entity({ id: r.id, name: r.name, team: r.team, kind });
     e.isBot = !!r.bot; e.diff = r.diff || 'normal';
     e.kit = KITS[r.kit] ? r.kit : 'default'; e.maxHp = e.kit === 'tank' ? 130 : 100; e.hp = e.maxHp;
-    if (r.lvl && kind !== 'local') e.avatar.setName(`[${r.lvl}] ${r.name}`, r.team);
+    e.avatar.setLook(looks[r.id]);
+    if (kind !== 'local') e.avatar.setName(r.lvl ? `[${r.lvl}] ${r.name}` : r.name, r.team, true);
     e.inv.add('wood_sword', 1); e.held = 'wood_sword'; e.avatar.setHeld('wood_sword');
     kitItems(e, true);
     spawnAt(e);
@@ -66,7 +78,8 @@ export function startMatch(cfg) {
   buildHotbar(); renderHotbar(true); renderResources(); renderTeams();
   const T = TEAMS[G.local.team];
   $('teamBadge').textContent = T.name.toUpperCase() + ' TEAM'; $('teamBadge').style.background = T.css;
-  bigMessage('BED WARS', `Protect your bed and destroy the others!`, T.css, 3200);
+  bigMessage('BED WARS', `${MAPS[mapId].icon} ${MAPS[mapId].name}${cfg.ranked ? '  •  RANKED' : ''}`, T.css, 3200);
+  setTimeout(() => { if (G.match === m) toast('💡 ' + TIPS[Math.floor(Math.random() * TIPS.length)]); }, 4000);
   setChatHandler(text => { if (!canChat()) return; chatLine(G.name, text, T.css); m.send('chat', { n: G.name, t: text, tm: G.local.team }); });
   setPlayerHooks({ onInteract: interact, onTab: (on) => { if (on) renderScoreboard(); $('scoreboard').style.display = on ? 'block' : 'none'; }, onEscape: null });
   setNpcHook(() => npcInFront() ? (interact(), true) : false);
@@ -80,6 +93,13 @@ function kitItems(e, first) {
   if (e.kit === 'archer') { if (!e.inv.has('bow')) e.inv.add('bow', 1); e.inv.add('arrow', 8); }
   if (e.kit === 'miner' && !e.inv.best('pickaxe')) e.inv.add('wood_pickaxe', 1);
   if (e.kit === 'bomber' && first) e.inv.add('fireball', 1);
+}
+
+// bots get a random hat so matches look lively
+function botLook(id) {
+  let h = 0; for (const c of id) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  const hats = Object.keys(COSMETICS).filter(k => COSMETICS[k].kind === 'skin');
+  return { ...DEFAULT_LOOK, skin: hats[h % hats.length] };
 }
 
 function spawnAt(e) {
@@ -104,6 +124,10 @@ function onLocalDeath(ev) {
   const e = G.local; renderHotbar(true); renderResources();
   show('deathScreen');
   $('deathTitle').textContent = ev.final ? 'FINAL DEATH' : 'YOU DIED';
+  const kc = TEAMS[ev.killerTeam]?.css || '#fff', kn = `<b style="color:${kc}">${esc(ev.killerName || '')}</b>`;
+  $('killedBy').innerHTML = ev.killer
+    ? (ev.cause === 'void' ? `Knocked into the void by ${kn}` : ev.cause === 'arrow' ? `Shot by ${kn}` : ev.cause === 'explosion' ? `Blown up by ${kn}` : ev.cause === 'fall' ? `Fell escaping ${kn}` : `Killed by ${kn}`)
+    : ev.cause === 'void' ? 'You fell into the void' : ev.cause === 'fall' ? 'You fell from a high place' : 'You died';
   if (ev.final) { $('deathText').textContent = 'Your bed is gone. You are out — you can keep watching.'; $('spectateBtn').style.display = 'inline-block'; }
   else {
     $('spectateBtn').style.display = 'none';
@@ -138,7 +162,7 @@ function sendState(force = false) {
   const m = G.match; if (!m?.online) return;
   const e = G.local, now = performance.now();
   if (!force && now - lastSend < 110) return;
-  const d = [+e.pos.x.toFixed(2), +e.pos.y.toFixed(2), +e.pos.z.toFixed(2), +e.yaw.toFixed(2), Math.round(e.hp), e.dead ? 1 : 0, e.finalDead ? 1 : 0, e.heldItem() || '', e.armor, e.atkSeq];
+  const d = [+e.pos.x.toFixed(2), +e.pos.y.toFixed(2), +e.pos.z.toFixed(2), +e.yaw.toFixed(2), Math.round(e.hp), e.dead ? 1 : 0, e.finalDead ? 1 : 0, e.heldItem() || '', e.armor, e.atkSeq, e.balloons, e.emote?.id || '', e.emote?.seq || 0];
   const sig = d.join('|');
   if (!force && sig === lastSig && now - lastSend < 1000) return;
   lastSig = sig; lastSend = now;
@@ -147,11 +171,13 @@ function sendState(force = false) {
 function sendBots() {
   const m = G.match, now = performance.now(); if (!m.online || now - lastBots < 150) return; lastBots = now;
   const l = [];
-  for (const e of G.entities.values()) if (e.kind === 'bot') l.push([e.id, +e.pos.x.toFixed(2), +e.pos.y.toFixed(2), +e.pos.z.toFixed(2), +e.yaw.toFixed(2), Math.round(e.hp), e.dead ? 1 : 0, e.finalDead ? 1 : 0, e.held || '', e.armor, e.atkSeq]);
+  for (const e of G.entities.values()) if (e.kind === 'bot') l.push([e.id, +e.pos.x.toFixed(2), +e.pos.y.toFixed(2), +e.pos.z.toFixed(2), +e.yaw.toFixed(2), Math.round(e.hp), e.dead ? 1 : 0, e.finalDead ? 1 : 0, e.held || '', e.armor, e.atkSeq, e.balloons, '', 0]);
   if (l.length) m.send('bots', { l });
 }
 function applyRemoteState(e, d) {
-  const [x, y, z, yaw, hp, dead, fd, held, armor, atk] = d;
+  const [x, y, z, yaw, hp, dead, fd, held, armor, atk, bal = 0, emo = '', emoSeq = 0] = d;
+  e.balloons = bal; e.avatar.setBalloons(bal);
+  if (emo && emoSeq !== e.emoteSeqSeen) { e.emoteSeqSeen = emoSeq; e.avatar.playEmote?.(emo); }
   const jump = e.target.distanceTo(new THREE.Vector3(x, y, z)) > 16;
   e.target.set(x, y, z); e.targetYaw = yaw;
   if (jump) e.pos.copy(e.target);
@@ -181,6 +207,7 @@ function onNet(p) {
     case 'grant': if (p.to === G.myId) { G.local.inv.res[p.cur] += p.n; sfx.pickup(); toast(`+${p.n} ${CURRENCY[p.cur].name}`); renderResources(); } break;
     case 'fx': if (p.v === G.myId || G.entities.get(p.v)?.kind === 'bot') { const e = G.entities.get(p.v); if (e) e.effects.slow = performance.now() + p.ms; } break;
     case 'end': if (!m.over) endMatch(p.winner); break;
+    case 'rank': showRankResult(p.res || {}); break;
     case 'chat': chatLine(p.n, p.t, TEAMS[p.tm]?.css || '#fff'); break;
     case 'left': playerLeft(p.id); break;
   }
@@ -207,7 +234,27 @@ function checkElimination() {
   const m = G.match; if (!m || m.over || !m.isAuth()) return;
   if (performance.now() - m.startedAt < 1500) return;
   const alive = m.teams.filter(t => m.teamAlive(t));
-  if (alive.length <= 1) { const w = alive[0] || null; m.send('end', { winner: w }); endMatch(w); }
+  for (const t of m.teams) if (!alive.includes(t) && !m.elimOrder.includes(t)) m.elimOrder.push(t);
+  if (alive.length <= 1) { const w = alive[0] || null; m.send('end', { winner: w }); endMatch(w); if (m.ranked) finishRanked(w); }
+}
+
+// Ranked: the host reports every player's placement (1 = winning team) to the database.
+async function finishRanked(winner) {
+  const m = G.match; const order = [...m.elimOrder].reverse(); // last eliminated = 2nd place
+  const place = {}; if (winner) place[winner] = 1;
+  order.forEach((t, i) => { if (!place[t]) place[t] = (winner ? 2 : 1) + i; });
+  const placements = {};
+  for (const r of m.roster) if (r.uid && !r.bot) placements[r.uid] = place[r.team] || m.teams.length;
+  try {
+    const res = await rankedFinish(m.ranked, placements);
+    m.send('rank', { res }); showRankResult(res);
+  } catch (err) { $('endRank').innerHTML = `<div class="muted small">Ranked result not saved: ${esc(err.message)}</div>`; }
+}
+function showRankResult(res) {
+  const mine = A.user && res[A.user.id]; if (!mine) return;
+  const rk = rankOf(mine.rating);
+  $('endRank').innerHTML = `<div class="rankRes"><span style="color:${rk.color}">${rk.icon} ${rk.name}</span> <b>${mine.rating}</b> <span class="${mine.delta >= 0 ? 'win' : 'loss'}">${mine.delta >= 0 ? '+' : ''}${mine.delta}</span></div>`;
+  refreshProfile().catch(() => {});
 }
 
 function endMatch(winner) {
@@ -220,7 +267,9 @@ function endMatch(winner) {
   $('endTitle').style.color = won ? '#ffd34e' : '#ff5252';
   $('endSub').innerHTML = winner ? `<b style="color:${TEAMS[winner].css}">${TEAMS[winner].name} Team</b> wins the match` : 'No team survived';
   $('endStats').innerHTML = scoreTable();
+  $('endRank').innerHTML = m.ranked ? '<div class="muted small">Updating ranked rating…</div>' : '';
   show('endScreen');
+  showPodium();
   sendResults(!!won);
 }
 
@@ -245,6 +294,27 @@ async function sendResults(won, early = false) {
     if (r.leveled_up) sfx.win();
   } catch (err) { box.innerHTML = `<div class="rw muted">Couldn't save progress: ${esc(err.message)}</div>`; }
 }
+// ---------- MVP PODIUM ----------
+const score = (s) => s.finals * 3 + s.kills + s.beds * 4;
+function showPodium() {
+  const m = G.match;
+  const top = Object.entries(m.stats).sort((a, b) => score(b[1]) - score(a[1])).slice(0, 3);
+  const base = new THREE.Vector3(0, 130, 0), g = new THREE.Group(); g.position.copy(base); G.world.add(g);
+  const floor = mkBox(40, 1, 24, mkMat(0x1b2333)); floor.position.y = -.5; g.add(floor);
+  const spots = [[0, 4.5, '#ffd34e', '1st'], [-7, 3, '#d9e2ec', '2nd'], [7, 1.8, '#e3a36b', '3rd']];
+  top.forEach(([id, st], i) => {
+    const [x, h, col, lbl] = spots[i];
+    const ped = mkBox(6, h, 6, mkMat(parseInt(col.slice(1), 16), { metal: .4, rough: .4 })); ped.position.set(x, h / 2, 0); g.add(ped);
+    const a = new Avatar({ team: st.team, tag: false }); a.setLook(m.looks[id]); a.setName(st.name, st.team, true);
+    a.group.position.set(x, h, 0); a.group.rotation.y = 0; g.add(a.group);
+    a.playEmote(i === 0 ? 'emote_cheer' : i === 1 ? 'emote_wave' : 'emote_flex'); a.emoteT = -9999; // keep the pose going
+    const lab = textSprite(`${lbl}  •  ${st.kills}K ${st.finals}F ${st.beds}B`, { color: col, bg: 'rgba(6,12,22,.85)', scale: .6 }); lab.position.set(x, h + 9, 0); g.add(lab);
+    m.podiumAvatars = (m.podiumAvatars || []).concat(a);
+  });
+  $('endScreen').classList.add('podium');
+  G.podiumCam = { pos: base.clone().add(new THREE.Vector3(0, 7, 22)), target: base.clone().add(new THREE.Vector3(0, 5, 0)) };
+}
+
 function scoreTable() {
   const rows = Object.entries(G.match.stats).sort((a, b) => (b[1].finals * 3 + b[1].kills + b[1].beds * 4) - (a[1].finals * 3 + a[1].kills + a[1].beds * 4));
   return `<table><tr><th>Player</th><th>Kills</th><th>Finals</th><th>Beds</th><th>Deaths</th></tr>${rows.map(([id, s]) => `<tr class="${id === G.myId ? 'me' : ''}"><td style="color:${TEAMS[s.team]?.css}">${esc(s.name)}</td><td>${s.kills}</td><td>${s.finals}</td><td>${s.beds}</td><td>${s.deaths}</td></tr>`).join('')}</table>`;
@@ -254,9 +324,10 @@ function renderScoreboard() { $('scoreboard').innerHTML = '<div class="sbT">SCOR
 export function leaveMatch() {
   clearInterval(deathTimer);
   if (G.match && !G.match.submitted && !G.match.over) sendResults(false, true); // left early: still counts kills/time
+  $('endScreen').classList.remove('podium'); hide('specHint');
   hide('endScreen'); hide('deathScreen'); hide('matchHud'); hide('hotbarWrap'); hide('scoreboard');
   if (G.match?.online) net.leaveParty();
-  G.match = null;
+  G.match = null; G.podiumCam = null; G.spec = null;
   for (const e of [...G.entities.values()]) e.removeFromWorld();
   clearProjectiles();
   onExit?.();
@@ -390,7 +461,9 @@ export function updateMatch(dt) {
       if (m.over) continue;
       updateBot(e, dt);
       const wg = e.onGround;
+      balloonLift(e, dt);
       moveEntity(e, dt);
+      e.avatar.setBalloons(e.balloons);
       trackFall(e, wg);
       e.avatar.group.rotation.y = e.yaw;
       e.avatar.setHeld(e.held);
@@ -424,5 +497,42 @@ export function updateMatch(dt) {
   updateGens(dt);
   if (!m.over) { sendState(); if (auth) sendBots(); }
   if (Math.floor(now / 1000) !== Math.floor((now - dt * 1000) / 1000)) checkElimination();
+  for (const a of m.podiumAvatars || []) a.animate(dt, false, false);
   updateHud(dt);
+  drawMinimap(dt);
+}
+
+// ---------- MINI-MAP ----------
+let mmT = 0;
+function drawMinimap(dt) {
+  mmT += dt; if (mmT < .1) return; mmT = 0;
+  const m = G.match, cv = $('minimap'); if (!cv || m.over) return;
+  const x = cv.getContext('2d'); if (!x) return;
+  const W = cv.width, s = W / 2 / m.extent, c = W / 2;
+  const P = (wx, wz) => [c + wx * s, c + wz * s];
+  x.clearRect(0, 0, W, W);
+  x.fillStyle = 'rgba(6,12,22,.72)'; x.beginPath(); x.arc(c, c, c - 1, 0, Math.PI * 2); x.fill();
+  for (const i of m.islands) {
+    const [px, pz] = P(i.cx * 3, i.cz * 3), hw = (i.half * 2 + 1) * 3 * s;
+    x.fillStyle = i.kind === 'mid' ? '#5a6f5a' : i.kind === 'diamond' ? '#4c6670' : '#4a7a40';
+    x.fillRect(px - hw / 2, pz - hw / 2, hw, hw);
+  }
+  for (const g of m.gens) { if (g.kind === 'team') continue; const [px, pz] = P(g.pos.x, g.pos.z); x.fillStyle = g.kind === 'diamond' ? '#62e7ff' : '#4dff8a'; x.fillRect(px - 2, pz - 2, 4, 4); }
+  for (const t of m.teams) {
+    const b = m.beds[t]; const [px, pz] = P(b.mesh.position.x, b.mesh.position.z);
+    x.fillStyle = TEAMS[t].css; x.fillRect(px - 4, pz - 4, 8, 8);
+    if (!b.alive) { x.strokeStyle = '#ff2a2a'; x.lineWidth = 2; x.beginPath(); x.moveTo(px - 5, pz - 5); x.lineTo(px + 5, pz + 5); x.moveTo(px + 5, pz - 5); x.lineTo(px - 5, pz + 5); x.stroke(); }
+  }
+  const me = G.local;
+  for (const e of G.entities.values()) {
+    if (!e.alive || e === me) continue;
+    const near = Math.hypot(e.pos.x - me.pos.x, e.pos.z - me.pos.z) < 40;
+    if (e.team !== me.team && !near) continue;
+    const [px, pz] = P(e.pos.x, e.pos.z);
+    x.fillStyle = TEAMS[e.team].css; x.beginPath(); x.arc(px, pz, 3.2, 0, Math.PI * 2); x.fill();
+    x.strokeStyle = '#000'; x.lineWidth = 1; x.stroke();
+  }
+  // you: an arrow pointing where the camera looks
+  const [px, pz] = P(me.pos.x, me.pos.z), a = -G.cam.yaw;
+  x.save(); x.translate(px, pz); x.rotate(a); x.fillStyle = '#fff'; x.beginPath(); x.moveTo(0, -7); x.lineTo(5, 5); x.lineTo(0, 2); x.lineTo(-5, 5); x.closePath(); x.fill(); x.restore();
 }

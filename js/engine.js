@@ -23,7 +23,7 @@ export function initEngine() {
   const camera = new THREE.PerspectiveCamera(G.settings.fov, innerWidth / innerHeight, 0.1, 2000);
   scene.add(camera); // camera children (first-person view model) need it in the scene
 
-  scene.add(new THREE.HemisphereLight(0xdff1ff, 0x5a6a52, 0.95));
+  hemi = new THREE.HemisphereLight(0xdff1ff, 0x5a6a52, 0.95); scene.add(hemi);
   const sun = new THREE.DirectionalLight(0xfff3dd, 2.1);
   sun.position.set(80, 160, 60);
   sun.castShadow = true;
@@ -41,7 +41,7 @@ export function initEngine() {
   });
 }
 
-let sky, clouds;
+let sky, clouds, hemi = null, lavaPlane = null, snow = null;
 function makeSky(scene) {
   const mat = new THREE.ShaderMaterial({
     side: THREE.BackSide, depthWrite: false, fog: false,
@@ -72,10 +72,37 @@ function makeSky(scene) {
   scene.add(clouds);
 }
 
+// Colours/sky/weather for a map theme (see MAPS in config.js)
+export function applyTheme(th) {
+  const u = sky.material.uniforms;
+  u.top.value.setHex(th.sky[0]); u.mid.value.setHex(th.sky[1]); u.low.value.setHex(th.sky[2]);
+  G.scene.fog.color.setHex(th.fog);
+  G.sun.color.setHex(th.sun); hemi.color.setHex(th.hemi[0]); hemi.groundColor.setHex(th.hemi[1]);
+  clouds.visible = th.clouds != null;
+  if (th.clouds != null) for (const c of clouds.children) for (const b of c.children) b.material.color.setHex(th.clouds);
+  if (lavaPlane) { G.scene.remove(lavaPlane); lavaPlane = null; }
+  if (th.lava) { lavaPlane = new THREE.Mesh(new THREE.PlaneGeometry(1600, 1600), new THREE.MeshBasicMaterial({ color: 0xff5a14, fog: false })); lavaPlane.rotation.x = -Math.PI / 2; lavaPlane.position.y = -70; G.scene.add(lavaPlane); }
+  if (snow) { G.scene.remove(snow); snow = null; }
+  if (th.snow) {
+    const n = 900, pos = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) { pos[i * 3] = (Math.random() - .5) * 160; pos[i * 3 + 1] = Math.random() * 80; pos[i * 3 + 2] = (Math.random() - .5) * 160; }
+    const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    snow = new THREE.Points(g, new THREE.PointsMaterial({ color: 0xffffff, size: .5, transparent: true, opacity: .85 }));
+    G.scene.add(snow);
+  }
+}
+
 export function updateEnvironment(dt) {
   const cam = G.camera.position;
   sky.position.copy(cam);
   for (const c of clouds.children) { c.position.x += dt * 4; if (c.position.x > 700) c.position.x = -700; }
+  if (lavaPlane) lavaPlane.material.color.setHSL(.04, 1, .45 + Math.sin(performance.now() / 700) * .05);
+  if (snow) {
+    snow.position.set(cam.x, cam.y - 40, cam.z);
+    const a = snow.geometry.attributes.position, arr = a.array;
+    for (let i = 1; i < arr.length; i += 3) { arr[i] -= dt * 6; if (arr[i] < 0) arr[i] += 80; }
+    a.needsUpdate = true;
+  }
   // shadows follow the camera target so they stay sharp near the player
   const p = G.local ? G.local.pos : cam;
   G.sun.position.set(p.x + 80, p.y + 160, p.z + 60);
@@ -124,6 +151,17 @@ export function tex(kind, color = 0xffffff) {
   else if (kind === 'obsidian') t = canvasTex((x, s, r) => { noise(x, s, r, 0x241634, .5); for (let i = 0; i < 18; i++) { x.fillStyle = shade(0x6a3fa0, .7 + r() * .6); x.fillRect(r() * s | 0, r() * s | 0, 2, 1); } });
   else if (kind === 'metal') t = canvasTex((x, s, r) => { noise(x, s, r, color, .12); x.fillStyle = 'rgba(0,0,0,.25)'; x.fillRect(0, 0, s, 2); x.fillRect(0, s - 2, s, 2); x.fillRect(0, 0, 2, s); x.fillRect(s - 2, 0, 2, s); });
   else if (kind === 'plaza') t = canvasTex((x, s, r) => { noise(x, s, r, 0xcfd4da, .12); x.fillStyle = shade(0xcfd4da, .78); x.fillRect(0, 0, s, 1); x.fillRect(0, 0, 1, s); x.fillRect(0, 16, s, 1); x.fillRect(16, 0, 1, s); });
+  else if (kind === 'snow') t = canvasTex((x, s, r) => noise(x, s, r, 0xf2f7fb, .08));
+  else if (kind === 'snowSide') t = canvasTex((x, s, r) => { noise(x, s, r, 0x8a5a36, .3); for (let i = 0; i < s; i++) { const h = 6 + Math.floor(r() * 4); for (let j = 0; j < h; j++) { x.fillStyle = shade(0xf2f7fb, .92 + r() * .08); x.fillRect(i, j, 1, 1); } } });
+  else if (kind === 'ice') t = canvasTex((x, s, r) => { noise(x, s, r, 0x9fd4f2, .14); x.strokeStyle = 'rgba(255,255,255,.5)'; for (let i = 0; i < 4; i++) { x.beginPath(); x.moveTo(r() * s, r() * s); x.lineTo(r() * s, r() * s); x.stroke(); } });
+  else if (kind === 'sand') t = canvasTex((x, s, r) => noise(x, s, r, 0xe8cf8f, .14));
+  else if (kind === 'sandSide' || kind === 'sandstone') t = canvasTex((x, s, r) => { noise(x, s, r, 0xd9bb7a, .14); x.fillStyle = shade(0xd9bb7a, .82); for (let j = 4; j < s; j += 9) x.fillRect(0, j, s, 2); });
+  else if (kind === 'netherrack') t = canvasTex((x, s, r) => { noise(x, s, r, 0x7a2a26, .4); for (let i = 0; i < 20; i++) { x.fillStyle = shade(0x4a1212, .8 + r() * .4); x.fillRect(r() * s | 0, r() * s | 0, 2, 2); } });
+  else if (kind === 'netherbrick') t = canvasTex((x, s, r) => { noise(x, s, r, 0x3a1418, .3); x.fillStyle = '#1a0608'; for (let j = 0; j < s; j += 8) { x.fillRect(0, j, s, 1); const o = (j / 8) % 2 ? 8 : 0; for (let i = o; i < s; i += 16) x.fillRect(i, j, 1, 8); } });
+  else if (kind === 'stripes') t = canvasTex((x, s) => { x.fillStyle = hex(color); x.fillRect(0, 0, s, s); x.fillStyle = '#ffffff'; for (let i = 0; i < s; i += 8) x.fillRect(i, 0, 4, s); });
+  else if (kind === 'candy') t = canvasTex((x, s) => { x.fillStyle = '#ff7ad9'; x.fillRect(0, 0, s, s); x.fillStyle = '#ffffff'; for (let i = -s; i < s; i += 8) { x.beginPath(); x.moveTo(i, 0); x.lineTo(i + 4, 0); x.lineTo(i + 4 + s, s); x.lineTo(i + s, s); x.fill(); } });
+  else if (kind === 'checker') t = canvasTex((x, s) => { for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) { x.fillStyle = (i + j) % 2 ? '#111111' : hex(color); x.fillRect(i * 8, j * 8, 8, 8); } });
+  else if (kind === 'stars') t = canvasTex((x, s, r) => { x.fillStyle = '#120a2e'; x.fillRect(0, 0, s, s); for (let i = 0; i < 26; i++) { x.fillStyle = r() < .3 ? '#b47dff' : '#ffffff'; x.fillRect(r() * s | 0, r() * s | 0, 1, 1); } });
   else t = canvasTex((x, s, r) => noise(x, s, r, color, .2));
   texCache[key] = t;
   return t;
@@ -155,7 +193,9 @@ export function textSprite(text, { color = '#fff', bg = 'rgba(0,0,0,.6)', scale 
   x.font = font; x.textAlign = 'center'; x.textBaseline = 'middle';
   if (bg) { x.fillStyle = bg; roundRect(x, 4, 8, c.width - 8, 68, 18); x.fill(); }
   x.lineWidth = 6; x.strokeStyle = 'rgba(0,0,0,.55)'; x.strokeText(text, c.width / 2, 43);
-  x.fillStyle = color; x.fillText(text, c.width / 2, 43);
+  if (color === 'rainbow') { const gr = x.createLinearGradient(24, 0, c.width - 24, 0); ['#ff5252', '#ffb13b', '#ffe45c', '#4dff8a', '#38c6ff', '#b47dff'].forEach((col, i, a) => gr.addColorStop(i / (a.length - 1), col)); x.fillStyle = gr; }
+  else x.fillStyle = color;
+  x.fillText(text, c.width / 2, 43);
   const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
   const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, transparent: true, depthWrite: false, fog: false }));
   const h = 2.2 * scale; sp.scale.set(h * c.width / c.height, h, 1);
